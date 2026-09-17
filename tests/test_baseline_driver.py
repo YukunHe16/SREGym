@@ -133,7 +133,8 @@ def harness(monkeypatch, tmp_path):
     return state
 
 
-def run_main(monkeypatch, backend, *, max_calls="unlimited", mode="full", hard_cap=80):
+def run_main(monkeypatch, backend, *, max_calls="unlimited", mode="full", hard_cap=80, protocol="tools"):
+    monkeypatch.setattr(driver, "PROTOCOL", protocol)
     monkeypatch.setattr(driver, "MAX_COMMANDS_RAW", max_calls)
     monkeypatch.setattr(driver, "SUBMISSION_MODE", mode)
     monkeypatch.setattr(driver, "HARD_CAP", hard_cap)
@@ -282,10 +283,10 @@ def test_invalid_submit_arguments_are_rejected(monkeypatch, harness):
     assert harness["submissions"] == [(DIAGNOSIS, "diagnosis")]
 
 
-def test_two_bad_replies_submit_the_fallback_and_exit_2(monkeypatch, harness):
+def test_two_bad_replies_end_without_submission_and_exit_2(monkeypatch, harness):
     backend = FakeBackend([Reply(error="model call failed: boom"), Reply(error="model call failed: boom")])
     assert run_main(monkeypatch, backend) == 2
-    assert harness["submissions"] == [(protocol.FALLBACK_DIAGNOSIS, "diagnosis")]
+    assert harness["submissions"] == []  # nothing is sent, like a CLI agent that stops
     assert read_results(harness["logs"])["baseline"]["termination_reason"] == "model_failure"
 
 

@@ -67,10 +67,12 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
-  # Baseline agent arms (provider-key models through LiteLLM; one growing conversation with tools).
-  # BASELINE_MAX_COMMANDS is the tool-call budget per stage (submit excluded). Tools default to the
-  # CLI agents' condition (bash, read_file, write_file); BASELINE_TOOLS adds MCP sub-servers.
-  # BASELINE_SUBMISSION_MODE=no_mechanism makes the submit tool take three fields and no "why".
+  # Baseline agent arms (provider-key models through LiteLLM). Default protocol "mini" is the
+  # mini-swe-agent recipe: one ```bash block per reply, a fresh subshell per command, the marker
+  # command submits; limits end a stage without a submission. BASELINE_MAX_COMMANDS is the
+  # per-stage command budget (budget arms get one notice and may then only submit).
+  # BASELINE_SUBMISSION_MODE=no_mechanism makes the submission three lines and no "why".
+  # BASELINE_PROTOCOL=tools is the tool-calling variant (local tools; BASELINE_TOOLS adds MCP).
   # No temperature is sent (provider default), as with the CLI agents; BASELINE_TEMPERATURE pins one.
   - name: baseline
     kickoff_command: python -m clients.baseline.driver
@@ -78,19 +80,6 @@ agents:
     kickoff_env:
       BASELINE_MAX_COMMANDS: unlimited
       BASELINE_SUBMISSION_MODE: full
-      BASELINE_HARD_CAP: "80"
-      BASELINE_DEADLINE_S: "1500"
-      BASELINE_MAX_TOKENS: "65536"
-      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
-    install_script: null
-    agent_version: null
-  - name: baseline_mcp
-    kickoff_command: python -m clients.baseline.driver
-    kickoff_workdir: .
-    kickoff_env:
-      BASELINE_MAX_COMMANDS: unlimited
-      BASELINE_SUBMISSION_MODE: full
-      BASELINE_TOOLS: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
       BASELINE_HARD_CAP: "80"
       BASELINE_DEADLINE_S: "1500"
       BASELINE_MAX_TOKENS: "65536"
@@ -143,6 +132,33 @@ agents:
     kickoff_env:
       BASELINE_MAX_COMMANDS: "10"
       BASELINE_SUBMISSION_MODE: no_mechanism
+      BASELINE_MAX_TOKENS: "65536"
+      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
+    install_script: null
+    agent_version: null
+  - name: baseline_tools
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BASELINE_PROTOCOL: tools
+      BASELINE_MAX_COMMANDS: unlimited
+      BASELINE_SUBMISSION_MODE: full
+      BASELINE_HARD_CAP: "80"
+      BASELINE_DEADLINE_S: "1500"
+      BASELINE_MAX_TOKENS: "65536"
+      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
+    install_script: null
+    agent_version: null
+  - name: baseline_mcp
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BASELINE_PROTOCOL: tools
+      BASELINE_TOOLS: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
+      BASELINE_MAX_COMMANDS: unlimited
+      BASELINE_SUBMISSION_MODE: full
+      BASELINE_HARD_CAP: "80"
+      BASELINE_DEADLINE_S: "1500"
       BASELINE_MAX_TOKENS: "65536"
       BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
     install_script: null

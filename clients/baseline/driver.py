@@ -1,13 +1,14 @@
 """
-Baseline agent driver for SREGym: a tool-calling loop around one model.
+Baseline agent driver for SREGym.
 
-The examinee gets the same task instruction as the CLI agents, a small set of tools
-(``bash``, ``read_file``, ``write_file`` in its container; optionally SREGym's MCP tools
-for kubectl, prometheus, jaeger and loki) and a driver-owned ``submit`` tool.
-Each step the model replies with tool calls; the driver runs them in order, feeds the
-results back and stops when the model submits. Like the Stratus agent, a stage that
-hits its tool-call budget, the hard cap or the deadline gets one last turn with only
-the submit tool, and a plain-text answer at that point is submitted as is.
+Default protocol ``mini`` is the mini-swe-agent recipe: the model gets the same task
+instruction as the CLI agents, replies with exactly one ```bash block per turn, each command
+runs in a fresh subshell, the observation is the return code plus the output, and a stage
+ends when a command prints the marker line followed by the submission. Limits end the stage
+without a submission, like a CLI agent that stops; budget arms get one notice and may then
+only submit. Protocol ``tools`` (BASELINE_PROTOCOL=tools) is the tool-calling variant: local
+tools (bash, read_file, write_file), optional MCP tools, a driver-owned submit tool, and a
+Stratus-style forced last turn at the limits.
 
 Knobs (environment):
 
@@ -45,7 +46,7 @@ from logger import init_logger  # noqa: E402
 
 init_logger()
 
-from clients.baseline import protocol  # noqa: E402
+from clients.baseline import mini, protocol  # noqa: E402
 from clients.baseline.backends import ApiBackend, Reply, parse_arguments  # noqa: E402
 from clients.baseline.tools import (  # noqa: E402,F401  (CommandResult / run_command re-exported for tests)
     CommandResult,
@@ -73,6 +74,8 @@ MODEL = os.environ.get("AGENT_MODEL_ID", "openai/glm-5.3")
 REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 
+PROTOCOL = os.environ.get("BASELINE_PROTOCOL", "mini")  # mini: one bash block per reply; tools: function calling
+PROTOCOLS = ("mini", "tools")
 MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "unlimited")
 SUBMISSION_MODE = os.environ.get("BASELINE_SUBMISSION_MODE", "full")
 TOOLS_RAW = os.environ.get("BASELINE_TOOLS")
@@ -91,6 +94,7 @@ EXIT_OK = 0
 EXIT_INFRA = 1
 EXIT_MODEL_FAILURE = 2
 EXIT_EXTERNAL_SUBMISSION = 3
+EXIT_NO_SUBMISSION = 4  # the stage ended without a submission (limits, repeated format errors)
 
 
 def parse_budget(value: str) -> int | None:
@@ -482,6 +486,199 @@ def run_stage(
             return outcome(None, "external_submission")
 
 
+def run_stage_mini(
+    backend: ApiBackend,
+    session: Session,
+    transcript: Transcript,
+    steps_dir: Path,
+    *,
+    stage: str,
+    mode: str,
+    max_calls: int | None,
+    work_dir: str,
+    call_offset: int = 0,
+    index_offset: int = 0,
+) -> StageOutcome:
+    """mini-swe-agent's loop: one bash block per reply, one observation per command, the marker ends the stage.
+
+    A budget arm (``max_calls`` set) gets one notice when the budget is spent and may then only submit.
+    Unlimited arms stop at the hard cap or the deadline without a submission, like a CLI agent timing out.
+    """
+    started = time.monotonic()
+    usage_records: list[dict] = []
+    model_calls = 0
+    used = 0
+    consecutive_failures = 0
+    format_errors = 0
+    guard_warned = False
+    guard_tripped = False
+    budget_notice_sent = False
+
+    def outcome(text: str | None, reason: str) -> StageOutcome:
+        return StageOutcome(
+            stage,
+            text,
+            reason,
+            used,
+            model_calls,
+            usage_records,
+            guard_tripped,
+            round(time.monotonic() - started, 3),
+            {"bash": used},
+        )
+
+    def rejected(reason: str) -> str:
+        return mini.REJECTED_COMMAND_OBSERVATION.format(reason=reason)
+
+    while True:
+        if time.monotonic() - started > DEADLINE_S:
+            return outcome(None, "deadline_no_submission")
+        budget_exhausted = max_calls is not None and used >= max_calls
+        if max_calls is None and used >= HARD_CAP:
+            return outcome(None, "hard_cap_no_submission")
+        if budget_exhausted and not budget_notice_sent:
+            session.add_user(mini.budget_exhausted_text(max_calls) if max_calls else mini.ZERO_BUDGET_RULE.strip())
+            budget_notice_sent = True
+
+        model_calls += 1
+        call_number = call_offset + model_calls
+        reply = backend.complete(session.messages, [], step_dir=steps_dir / f"step_{call_number:02d}")
+        usage_records.append(reply.usage)
+        action, n_actions = (None, 0) if reply.error else mini.parse_action(reply.content)
+        transcript.write(
+            {
+                "type": "model_call",
+                "stage": stage,
+                "call": call_number,
+                "messages": len(session.messages),
+                "latency_s": reply.latency_s,
+                "usage": reply.usage,
+                "finish_reason": reply.finish_reason,
+                "content": (reply.content or "")[:20000],
+                "action": action,
+                "n_actions": n_actions,
+                "error": reply.error,
+            }
+        )
+        if reply.error:
+            consecutive_failures += 1
+            logger.warning(f"Model call {call_number} unusable: {reply.error}")
+            if consecutive_failures >= 2:
+                return outcome(None, "model_failure")
+            time.sleep(RETRY_WAIT_S)
+            continue
+        consecutive_failures = 0
+        session.add_assistant(reply)
+
+        if action is None:
+            format_errors += 1
+            logger.info(f"[{stage}] call {call_number}: format error ({n_actions} actions)")
+            if format_errors >= mini.MAX_CONSECUTIVE_FORMAT_ERRORS:
+                return outcome(None, "repeated_format_error")
+            session.add_user(mini.format_error_text(n_actions))
+            continue
+        format_errors = 0
+        index = index_offset + used + 1
+
+        if budget_exhausted and mini.MARKER not in action:
+            session.add_user(
+                rejected("the command budget for this stage is spent; only the submission command is allowed")
+            )
+            transcript.write(
+                {
+                    "type": "command",
+                    "stage": stage,
+                    "index": index,
+                    "command": action,
+                    "refused": "budget_exhausted",
+                    "exit_code": 126,
+                }
+            )
+            format_errors += 1
+            if format_errors >= mini.MAX_CONSECUTIVE_FORMAT_ERRORS:
+                return outcome(None, "budget_exhausted_no_submission")
+            continue
+        if is_external_submit(action):
+            used += 1
+            session.add_user(
+                rejected(
+                    "the driver does not run commands that call the submission endpoint; submit with the marker command instead"
+                )
+            )
+            transcript.write(
+                {
+                    "type": "command",
+                    "stage": stage,
+                    "index": index,
+                    "command": action,
+                    "refused": "external_submit",
+                    "exit_code": 126,
+                }
+            )
+            continue
+
+        logger.info(f"[{stage}] call {call_number}: {action[:160]}")
+        result = run_command(action, COMMAND_TIMEOUT, cwd=work_dir)
+        separator = "\n" if result.stdout and not result.stdout.endswith("\n") else ""
+        output = result.stdout + (separator + result.stderr if result.stderr else "")
+        submission = None if result.timed_out else mini.finished(output, result.exit_code)
+        transcript.write(
+            {
+                "type": "command",
+                "stage": stage,
+                "index": index,
+                "command": action,
+                "exit_code": result.exit_code,
+                "duration_s": result.duration_s,
+                "timed_out": result.timed_out,
+                "refused": None,
+                "submission_attempt": submission is not None,
+                "stdout": _stream_record(result.stdout),
+                "stderr": _stream_record(result.stderr),
+            }
+        )
+        if result.timed_out:
+            used += 1
+            session.add_user(mini.timeout_text(action, output))
+            continue
+        if submission is None:
+            used += 1
+            session.add_user(mini.observation_text(result.exit_code, output))
+            observed = current_stage()
+            if observed not in {stage, None}:
+                logger.error(
+                    f"Conductor stage is {observed} after a command; the model bypassed the submission command"
+                )
+                return outcome(None, "external_submission")
+            continue
+
+        # The marker was printed: this command is the submission attempt.
+        if stage == "mitigation":
+            return outcome("", "submitted")
+        if mode == "full":
+            if not submission:
+                session.add_user(
+                    rejected("the diagnosis after the marker line is empty; print your diagnosis after it")
+                )
+                continue
+            return outcome(submission, "submitted")
+        fields, error = mini.parse_three_fields(submission)
+        if error:
+            session.add_user(rejected(error))
+            continue
+        assert fields is not None
+        hits = mini.mechanism_guard_hits(fields)
+        if hits and not guard_warned:
+            guard_warned = True
+            session.add_user(
+                rejected(mini.GUARD_REJECTION.format(hits=", ".join(repr(h) for h in hits))[len("rejected: ") :])
+            )
+            logger.info(f"Submission names a mechanism ({hits}); asking once more")
+            continue
+        guard_tripped = bool(hits)
+        return outcome(mini.compose_three_fields(fields), "submitted")
+
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
@@ -538,6 +735,9 @@ def main():
     if SUBMISSION_MODE not in protocol.SUBMISSION_MODES:
         logger.error(f"BASELINE_SUBMISSION_MODE must be one of {protocol.SUBMISSION_MODES}")
         sys.exit(EXIT_INFRA)
+    if PROTOCOL not in PROTOCOLS:
+        logger.error(f"BASELINE_PROTOCOL must be one of {PROTOCOLS}")
+        sys.exit(EXIT_INFRA)
 
     transcript = Transcript(logs_dir / "baseline_transcript.jsonl")
     results_path = logs_dir / f"baseline_results_{problem_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -546,12 +746,19 @@ def main():
         backend_version = backend.version()
     except Exception as e:
         backend_version = f"unavailable: {e}"
-    toolbox, tool_status = build_toolbox(problem_id, str(logs_dir))
+    if PROTOCOL == "tools":
+        toolbox, tool_status = build_toolbox(problem_id, str(logs_dir))
+    else:
+        toolbox, tool_status = (
+            None,
+            {"protocol": "mini", "local": ["bash"], "mcp_servers": [], "mcp_tools": [], "mcp_error": None},
+        )
     baseline_meta: dict = {
         "backend": backend.name,
         "backend_version": backend_version,
         "model": MODEL,
         "reasoning_effort": REASONING_EFFORT,
+        "protocol": PROTOCOL,
         "context": "session",
         "session_reasoning": SESSION_REASONING,
         "max_commands": "unlimited" if max_calls is None else max_calls,
@@ -581,10 +788,52 @@ def main():
 
     task_text = protocol.build_task_text(app_info)
     session = Session(pass_reasoning=SESSION_REASONING)
-    session.open(
-        backend.system_message(protocol.system_text(SUBMISSION_MODE)),
-        protocol.opening_turn(task_text, stage=stage, max_calls=max_calls),
-    )
+    if PROTOCOL == "mini":
+        session.open(
+            backend.system_message(mini.system_text()),
+            mini.instance_text(app_info, mode=SUBMISSION_MODE, max_commands=max_calls),
+        )
+        if stage == "mitigation":
+            session.add_user(mini.mitigation_text(max_calls))
+    else:
+        session.open(
+            backend.system_message(protocol.system_text(SUBMISSION_MODE)),
+            protocol.opening_turn(task_text, stage=stage, max_calls=max_calls),
+        )
+
+    def run(stage_name: str, **kwargs) -> StageOutcome:
+        if PROTOCOL == "mini":
+            return run_stage_mini(
+                backend,
+                session,
+                transcript,
+                logs_dir / "steps",
+                stage=stage_name,
+                mode=SUBMISSION_MODE,
+                max_calls=max_calls,
+                work_dir=str(logs_dir),
+                **kwargs,
+            )
+        assert toolbox is not None
+        return run_stage(
+            backend,
+            toolbox,
+            session,
+            transcript,
+            logs_dir / "steps",
+            stage=stage_name,
+            mode=SUBMISSION_MODE,
+            max_calls=max_calls,
+            **kwargs,
+        )
+
+    no_submission = {
+        "deadline_no_submission",
+        "hard_cap_no_submission",
+        "repeated_format_error",
+        "budget_exhausted_no_submission",
+        "model_failure",
+    }
 
     return_code = EXIT_OK
     usage_records: list[dict] = []
@@ -597,16 +846,7 @@ def main():
         save_results(results_path, problem_id, return_code, aggregate_usage(usage_records), baseline_meta)
 
     if stage == "diagnosis":
-        outcome = run_stage(
-            backend,
-            toolbox,
-            session,
-            transcript,
-            logs_dir / "steps",
-            stage="diagnosis",
-            mode=SUBMISSION_MODE,
-            max_calls=max_calls,
-        )
+        outcome = run("diagnosis")
         usage_records.extend(outcome.usage_records)
         calls = outcome.model_calls
         tool_calls = outcome.tool_calls_used
@@ -621,6 +861,10 @@ def main():
         )
         if outcome.termination_reason == "external_submission":
             return_code = EXIT_EXTERNAL_SUBMISSION
+        elif outcome.termination_reason in no_submission:
+            # Like a CLI agent that stops without submitting: nothing is sent and the run ends here.
+            return_code = EXIT_MODEL_FAILURE if outcome.termination_reason == "model_failure" else EXIT_NO_SUBMISSION
+            logger.warning(f"Diagnosis ended without a submission ({outcome.termination_reason}); exiting")
         else:
             try:
                 response = submit_to_conductor(outcome.text or "", "diagnosis")
@@ -634,34 +878,34 @@ def main():
                 return_code = EXIT_MODEL_FAILURE
         transcript.write({"type": "end", "stage": "diagnosis", "reason": outcome.termination_reason})
         finish_snapshot()
-        try:
-            stage = wait_for_stage({"mitigation", "tearing_down", "done"}, timeout=600)
-        except TimeoutError:
-            logger.warning("Timed out waiting for the stage after diagnosis")
+        if "diagnosis" not in submitted_stages:
             stage = None
+        else:
+            try:
+                stage = wait_for_stage({"mitigation", "tearing_down", "done"}, timeout=600)
+            except TimeoutError:
+                logger.warning("Timed out waiting for the stage after diagnosis")
+                stage = None
         if stage == "mitigation":
-            session.add_user(protocol.stage_change_turn(max_calls))
+            session.add_user(
+                mini.mitigation_text(max_calls) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls)
+            )
     else:
         logger.info("Benchmark starts at mitigation; skipping diagnosis")
 
     if stage == "mitigation":
-        outcome = run_stage(
-            backend,
-            toolbox,
-            session,
-            transcript,
-            logs_dir / "steps",
-            stage="mitigation",
-            mode=SUBMISSION_MODE,
-            max_calls=max_calls,
-            call_offset=calls,
-            index_offset=tool_calls,
-        )
+        outcome = run("mitigation", call_offset=calls, index_offset=tool_calls)
         usage_records.extend(outcome.usage_records)
         baseline_meta["stages"]["mitigation"] = outcome.summary()
         if outcome.termination_reason == "external_submission":
             if return_code == EXIT_OK:
                 return_code = EXIT_EXTERNAL_SUBMISSION
+        elif outcome.termination_reason in no_submission:
+            logger.warning(f"Mitigation ended without a submission ({outcome.termination_reason}); exiting")
+            if return_code == EXIT_OK:
+                return_code = (
+                    EXIT_MODEL_FAILURE if outcome.termination_reason == "model_failure" else EXIT_NO_SUBMISSION
+                )
         else:
             try:
                 response = submit_to_conductor("", "mitigation")
@@ -680,7 +924,7 @@ def main():
     finish_snapshot()
     transcript.write({"type": "end", "stage": "run", "return_code": return_code})
     transcript.close()
-    if toolbox.mcp is not None:
+    if toolbox is not None and toolbox.mcp is not None:
         toolbox.mcp.close()
     logger.info(f"Baseline driver finished with return code {return_code}")
     sys.exit(return_code)
