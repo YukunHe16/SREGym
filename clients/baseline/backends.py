@@ -123,8 +123,37 @@ def repair_inner_quotes(raw: str) -> str:
     return _QUOTED_FIELD.sub(fix, raw.strip())
 
 
+# DeepSeek sometimes answers in its native tool-call markup instead of JSON, e.g.
+# <｜｜DSML｜｜ invoke name="command"> <｜｜DSML｜｜ parameter name="note" string="true">text</｜｜DSML｜｜ parameter> ...
+_DSML_INVOKE = re.compile(r"<\uff5c+DSML\uff5c+ invoke name=\"(\w+)\"")
+_DSML_PARAM = re.compile(
+    r"<\uff5c+DSML\uff5c+ parameter name=\"(\w+)\"([^>]*)>(.*?)</\uff5c+DSML\uff5c+ parameter>", re.DOTALL
+)
+
+
+def parse_dsml(raw: str) -> dict | None:
+    """Read DeepSeek's tool-call markup as the step object; None when the reply is not in that form."""
+    if "DSML" not in raw:
+        return None
+    params = _DSML_PARAM.findall(raw)
+    invoke = _DSML_INVOKE.search(raw)
+    if not params or invoke is None:
+        return None
+    parsed: dict = {"action": invoke.group(1)}
+    for name, attrs, value in params:
+        value = value.strip()
+        if 'string="false"' in attrs:
+            try:
+                parsed[name] = json.loads(value)
+            except json.JSONDecodeError:
+                parsed[name] = value
+        else:
+            parsed[name] = value
+    return parsed
+
+
 def _parse_answer(raw: str) -> tuple[dict | None, str | None, bool]:
-    """(parsed object, error, repaired): strict parse, then stray backslashes, then inner quotes."""
+    """(parsed object, error, repaired): strict parse, then stray backslashes, inner quotes, DSML markup."""
     if not raw.strip():
         return None, "empty model reply", False
     try:
@@ -138,6 +167,8 @@ def _parse_answer(raw: str) -> tuple[dict | None, str | None, bool]:
                 break
             except json.JSONDecodeError:
                 continue
+        if parsed is None:
+            parsed = parse_dsml(raw)
         if parsed is None:
             return None, f"reply is not valid JSON: {exc}", False
         repaired = True

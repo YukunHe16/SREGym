@@ -54,7 +54,7 @@ def test_validate_step():
         {"action": "submit", "note": "n", "command": None, "diagnosis": ""}, "full", False
     )
     assert "missing keys" in protocol.validate_step({"action": "submit"}, "full", False)
-    assert "unexpected keys" in protocol.validate_step({**ok_command, "extra": 1}, "full", False)
+    assert protocol.validate_step({**ok_command, "extra": 1}, "full", False) is None  # extras are ignored
     assert protocol.validate_step("nope", "full", False) == "reply is not a JSON object"
     ok_nomech = {
         "action": "submit",

@@ -589,6 +589,28 @@ def test_api_backend_reports_repaired_replies(tmp_path, monkeypatch):
     assert result.error is None and result.repaired is True and result.parsed["command"] == "grep \\d"
 
 
+def test_parse_answer_reads_deepseek_dsml_markup():
+    from clients.baseline.backends import _parse_answer, parse_dsml
+
+    bar = "\uff5c\uff5c"
+    raw = (
+        f'<{bar}DSML{bar} calls>\n<{bar}DSML{bar} invoke name="command">\n'
+        f'<{bar}DSML{bar} parameter name="command" string="true">kubectl get pods -n x && echo \'---\'</{bar}DSML{bar} parameter>\n'
+        f'<{bar}DSML{bar} parameter name="note" string="true">Listing pods</{bar}DSML{bar} parameter>\n'
+        f'<{bar}DSML{bar} parameter name="diagnosis" string="false">null</{bar}DSML{bar} parameter>\n'
+        f"</{bar}DSML{bar} invoke>\n</{bar}DSML{bar} calls>"
+    )
+    parsed, error, repaired = _parse_answer(raw)
+    assert error is None and repaired is True
+    assert parsed == {
+        "action": "command",
+        "command": "kubectl get pods -n x && echo '---'",
+        "note": "Listing pods",
+        "diagnosis": None,
+    }
+    assert parse_dsml("plain text") is None and parse_dsml("DSML mentioned but no markup") is None
+
+
 def test_parse_budget():
     assert driver.parse_budget("0") == 0
     assert driver.parse_budget("3") == 3

@@ -139,7 +139,7 @@ agents:
       BASELINE_SUBMISSION_MODE: full
       BASELINE_HARD_CAP: "80"
       BASELINE_DEADLINE_S: "1500"
-      BASELINE_MAX_TOKENS: "32768"
+      BASELINE_MAX_TOKENS: "65536"
       BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
     install_script: null
     agent_version: null

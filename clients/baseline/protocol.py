@@ -226,9 +226,8 @@ def validate_step(obj: object, mode: str, submit_only: bool, stage: str = "diagn
     missing = [key for key in schema["required"] if key not in obj]
     if missing:
         return f"missing keys: {', '.join(missing)}"
-    extra = [key for key in obj if key not in schema["properties"]]
-    if extra:
-        return f"unexpected keys: {', '.join(extra)}"
+    # Keys outside the schema are ignored rather than rejected: a stray extra key is not a reason
+    # to throw away an otherwise complete reply (the Codex path enforces the schema itself).
     action = obj.get("action")
     if action not in schema["properties"]["action"]["enum"]:
         return f"action must be one of {schema['properties']['action']['enum']}, got {action!r}"
