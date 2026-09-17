@@ -67,3 +67,48 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
+  # Baseline agent arms: one model-chosen shell command per step, bounded by a
+  # command budget (b0 / b1 / b3 / b10 / bU = unlimited) and a submission mode
+  # (full = free-text diagnosis; nomech = component, affected parts and symptom only).
+  - name: baseline_b0_full
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "0", BASELINE_SUBMISSION_MODE: full, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_b1_full
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "1", BASELINE_SUBMISSION_MODE: full, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_b3_full
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "3", BASELINE_SUBMISSION_MODE: full, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_b10_full
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "10", BASELINE_SUBMISSION_MODE: full, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_bU_full
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: unlimited, BASELINE_SUBMISSION_MODE: full, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_b3_nomech
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "3", BASELINE_SUBMISSION_MODE: no_mechanism, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"
+  - name: baseline_b10_nomech
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env: {BASELINE_MAX_COMMANDS: "10", BASELINE_SUBMISSION_MODE: no_mechanism, BASELINE_BACKEND: codex}
+    install_script: install-codex.sh
+    agent_version: "0.154.0"

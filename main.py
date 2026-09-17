@@ -83,6 +83,9 @@ def run_preflight_check(
     }
 
     module_path = agent_driver_modules.get(agent_name)
+    if not module_path and agent_name.startswith("baseline"):
+        # Every baseline arm (baseline_b0_full, ...) shares one driver.
+        module_path = "clients.baseline.driver"
     if not module_path:
         return
 
