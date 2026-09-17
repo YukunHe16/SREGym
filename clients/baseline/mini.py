@@ -67,8 +67,7 @@ INSTANCE_TEMPLATE = """{task}
 1. Every response must contain exactly one action
 2. The action must be enclosed in triple backticks
 3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
-   However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
-4. Do not call the submission endpoint yourself. Submit through the command described below; the driver forwards it.
+4. Do not call the submission endpoint yourself. Submit with the command described below; the driver forwards it.
 {budget_rule}
 ## How to submit
 
@@ -77,40 +76,7 @@ followed by the diagnosis, for example:
 
 {submit_example}
 {submission_rules}
-Do not combine it with any other command. <important>After this command, you cannot continue investigating.</important>
-
-## Formatting your response
-
-Here is an example of a correct response:
-
-<example_response>
-THOUGHT: I need to see the state of the pods first to find anything unhealthy.
-
-```bash
-kubectl get pods -n {namespace}
-```
-</example_response>
-
-## Useful command examples
-
-### View file content:
-```bash
-# View specific lines with numbers
-nl -ba filename.yaml | sed -n '10,20p'
-```
-
-### Create a new file:
-```bash
-cat <<'EOF' > patch.yaml
-spec:
-  replicas: 1
-EOF
-```
-
-### Any other command you want to run
-```bash
-anything
-```"""
+Do not combine it with any other command. <important>After this command, you cannot continue investigating.</important>"""
 
 BUDGET_RULE = """5. You may run at most {max_commands} commands in this stage; the submission command does not count.
 """
@@ -185,7 +151,6 @@ def instance_text(app_info: dict, *, mode: str, max_commands: int | None) -> str
         marker=MARKER,
         submit_example=SUBMIT_DIAGNOSIS_EXAMPLE[mode],
         submission_rules=SUBMISSION_RULES[mode],
-        namespace=app_info.get("namespace", "<namespace>"),
     )
 
 
