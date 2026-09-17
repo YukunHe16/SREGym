@@ -1,20 +1,23 @@
 """
-Baseline agent driver for SREGym.
+Baseline agent driver for SREGym: a tool-calling loop around one model.
 
-The simplest examinee: the same task instruction as the CLI agents, a loop that
-asks the model for one shell command at a time, runs it, feeds the output back,
-and stops when the model submits or the command budget is exhausted. Two knobs
-make it a controlled examinee:
+The examinee gets the same task instruction as the CLI agents, a small set of tools
+(``bash``, ``read_file``, ``write_file`` in its container, plus whatever SREGym's MCP
+server offers: kubectl, prometheus, jaeger, loki) and a driver-owned ``submit`` tool.
+Each step the model replies with tool calls; the driver runs them in order, feeds the
+results back and stops when the model submits. Like the Stratus agent, a stage that
+hits its tool-call budget, the hard cap or the deadline gets one last turn with only
+the submit tool, and a plain-text answer at that point is submitted as is.
 
-    BASELINE_MAX_COMMANDS      0, a positive integer, or "unlimited" (per stage)
-    BASELINE_SUBMISSION_MODE   "full" or "no_mechanism"
+Knobs (environment):
 
-With a budget of 0 the model sees only the task description and must submit at
-once (the zero-action agent). In ``no_mechanism`` mode the diagnosis submission
-is assembled from three fields (faulty component, affected components, symptom)
-and may not explain why the fault happens. In the mitigation stage the same loop
-runs with the diagnosis transcript carried over; ``submit`` there means "my fix
-is applied" and sends the empty submission that triggers validation.
+    BASELINE_MAX_COMMANDS      tool calls per stage: 0, a positive integer, or "unlimited"
+    BASELINE_SUBMISSION_MODE   "full" or "no_mechanism" (three fields, no explanation of why)
+    BASELINE_TOOLS             comma list: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
+    BASELINE_HARD_CAP / BASELINE_DEADLINE_S / BASELINE_COMMAND_TIMEOUT / BASELINE_OUTPUT_CHARS
+
+The conversation is one growing message list (the model's replies and, when the provider
+returns it, its reasoning go back each step). Only anonymous artifact ids reach disk.
 """
 
 import argparse
@@ -24,8 +27,6 @@ import json
 import logging
 import os
 import re
-import signal
-import subprocess
 import sys
 import tempfile
 import time
@@ -45,7 +46,15 @@ from logger import init_logger  # noqa: E402
 init_logger()
 
 from clients.baseline import protocol  # noqa: E402
-from clients.baseline.backends import ApiBackend, CodexExecBackend, ModelBackend, StepResult  # noqa: E402
+from clients.baseline.backends import ApiBackend, Reply, parse_arguments  # noqa: E402
+from clients.baseline.tools import (  # noqa: E402,F401  (CommandResult / run_command re-exported for tests)
+    CommandResult,
+    McpToolbox,
+    Toolbox,
+    ToolSpec,
+    parse_tool_selection,
+    run_command,
+)
 from clients.harness.problem_id import resolve_problem_id  # noqa: E402
 from clients.harness.token_usage import aggregate_usage  # noqa: E402
 
@@ -60,26 +69,22 @@ API_PORT = os.getenv("API_PORT", "8000")
 CONDUCTOR_URL = f"http://{API_HOSTNAME}:{API_PORT}"
 
 AGENT_LOGS_DIR = os.environ.get("AGENT_LOGS_DIR", "./logs/baseline")
-MODEL = os.environ.get("AGENT_MODEL_ID", "gpt-5.5")
+MODEL = os.environ.get("AGENT_MODEL_ID", "openai/glm-5.3")
 REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT")
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 
-BACKEND_NAME = os.environ.get("BASELINE_BACKEND", "")
-MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "10")
+MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "unlimited")
 SUBMISSION_MODE = os.environ.get("BASELINE_SUBMISSION_MODE", "full")
-HARD_CAP = int(os.environ.get("BASELINE_HARD_CAP", "60"))
+TOOLS_RAW = os.environ.get("BASELINE_TOOLS")
+HARD_CAP = int(os.environ.get("BASELINE_HARD_CAP", "80"))
 COMMAND_TIMEOUT = int(os.environ.get("BASELINE_COMMAND_TIMEOUT", "60"))
 OUTPUT_CHARS = int(os.environ.get("BASELINE_OUTPUT_CHARS", "8000"))
-DEADLINE_S = float(os.environ.get("BASELINE_DEADLINE_S", "840"))
+DEADLINE_S = float(os.environ.get("BASELINE_DEADLINE_S", "1500"))
 RETRY_WAIT_S = float(os.environ.get("BASELINE_RETRY_WAIT_S", "30"))
-# stateless: every step is a fresh call that re-reads the whole transcript (the model's own reasoning is
-# not carried). session: one growing conversation; the model's replies and, when the provider returns
-# it, its reasoning are sent back each step, so the prefix stays cacheable and nothing is re-derived.
-CONTEXT = os.environ.get("BASELINE_CONTEXT", "stateless")
-CONTEXT_MODES = ("stateless", "session")
 SESSION_REASONING = os.environ.get("BASELINE_SESSION_REASONING", "1") != "0"
+MAX_NUDGES = 2  # replies without a tool call before the driver forces a submission
 
 STORED_STREAM_CHARS = 256 * 1024
-FALLBACK_DIAGNOSIS = "No diagnosis could be produced."
 SUBMIT_ENDPOINT = re.compile(r"/submit(?:_mcp)?\b")
 
 EXIT_OK = 0
@@ -97,15 +102,6 @@ def parse_budget(value: str) -> int | None:
     if budget < 0:
         raise ValueError("BASELINE_MAX_COMMANDS must be 0, a positive integer, or unlimited")
     return budget
-
-
-def default_backend_name() -> str:
-    """Explicit BASELINE_BACKEND wins; otherwise a provider endpoint means the API path, else the Codex CLI."""
-    if BACKEND_NAME:
-        return BACKEND_NAME
-    if os.environ.get("AGENT_API_BASE") or os.environ.get("AGENT_API_KEY"):
-        return "api"
-    return "codex"
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +138,8 @@ def current_stage() -> str | None:
 
 def wait_for_stage(target_stages: set[str], timeout: int = 300) -> str:
     """Poll the conductor until its stage is in ``target_stages``."""
-    start = time.time()
-    while time.time() - start < timeout:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         stage = current_stage()
         if stage in target_stages:
             logger.info(f"Conductor reached stage: {stage}")
@@ -164,52 +160,13 @@ def submit_to_conductor(solution: str, stage: str) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Command execution
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class CommandResult:
-    stdout: str
-    stderr: str
-    exit_code: int | None
-    duration_s: float
-    timed_out: bool = False
-
-
-def run_command(command: str, timeout: int, cwd: str | None = None) -> CommandResult:
-    """Run one command line through bash; kill the whole process group on timeout."""
-    started = time.monotonic()
-    with subprocess.Popen(
-        ["bash", "-lc", command],
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        start_new_session=True,
-    ) as process:
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            timed_out = True
-        exit_code = 124 if timed_out else process.returncode
-    return CommandResult(stdout or "", stderr or "", exit_code, round(time.monotonic() - started, 3), timed_out)
-
-
 def is_external_submit(command: str) -> bool:
-    """The model must submit through the protocol, not by calling the conductor itself."""
-    return SUBMIT_ENDPOINT.search(command) is not None
+    """A shell command that talks to the submission endpoint itself."""
+    return bool(SUBMIT_ENDPOINT.search(command))
 
 
 # ---------------------------------------------------------------------------
-# Transcript
+# Records
 # ---------------------------------------------------------------------------
 
 
@@ -239,42 +196,9 @@ def _stream_record(text: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Stage loop (diagnosis and mitigation share it)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class StageOutcome:
-    stage: str
-    text: str | None
-    termination_reason: str
-    commands_used: int
-    model_calls: int
-    usage_records: list[dict] = field(default_factory=list)
-    mechanism_guard_tripped: bool = False
-    wall_seconds: float = 0.0
-    steps: list[protocol.StepRecord] = field(default_factory=list)
-
-    def summary(self) -> dict:
-        return {
-            "commands_used": self.commands_used,
-            "model_calls": self.model_calls,
-            "termination_reason": self.termination_reason,
-            "wall_seconds": self.wall_seconds,
-            "mechanism_guard_tripped": self.mechanism_guard_tripped,
-            "usage_metrics": aggregate_usage(self.usage_records),
-        }
-
-
 @dataclass
 class Session:
-    """Session mode: the driver keeps the whole conversation and re-sends it on every step.
-
-    Assistant turns carry the model's raw JSON reply and, when ``pass_reasoning`` is on and the
-    provider returned one, its ``reasoning_content`` (Z.ai keeps it in context with
-    ``thinking.clear_thinking=false``; providers that reject the field need ``BASELINE_SESSION_REASONING=0``).
-    """
+    """The whole conversation; re-sent on every step."""
 
     pass_reasoning: bool = True
     messages: list[dict] = field(default_factory=list)
@@ -285,217 +209,276 @@ class Session:
     def add_user(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
 
-    def add_assistant(self, raw: str, reasoning: str | None) -> None:
-        message: dict = {"role": "assistant", "content": raw}
-        if self.pass_reasoning and reasoning:
-            message["reasoning_content"] = reasoning
-        self.messages.append(message)
+    def add_assistant(self, reply: Reply) -> None:
+        self.messages.append(reply.as_message(pass_reasoning=self.pass_reasoning))
+
+    def add_tool_result(self, call_id: str, text: str) -> None:
+        self.messages.append({"role": "tool", "tool_call_id": call_id, "content": text})
 
     def last_role(self) -> str | None:
         return self.messages[-1]["role"] if self.messages else None
 
 
-def make_backend(name: str, model: str, reasoning_effort: str | None) -> ModelBackend:
-    if name == "codex":
-        return CodexExecBackend(model, reasoning_effort)
-    if name == "api":
-        return ApiBackend(model, reasoning_effort)
-    raise ValueError(f"Unknown BASELINE_BACKEND: {name}")
+@dataclass
+class StageOutcome:
+    stage: str
+    text: str | None
+    termination_reason: str
+    tool_calls_used: int
+    model_calls: int
+    usage_records: list[dict] = field(default_factory=list)
+    mechanism_guard_tripped: bool = False
+    wall_seconds: float = 0.0
+    tool_counts: dict = field(default_factory=dict)
+    plain_text_submission: bool = False
+
+    def summary(self) -> dict:
+        return {
+            "commands_used": self.tool_calls_used,  # name kept for the result tooling; counts every tool call but submit
+            "tool_calls_used": self.tool_calls_used,
+            "tool_counts": self.tool_counts,
+            "model_calls": self.model_calls,
+            "termination_reason": self.termination_reason,
+            "wall_seconds": self.wall_seconds,
+            "mechanism_guard_tripped": self.mechanism_guard_tripped,
+            "plain_text_submission": self.plain_text_submission,
+            "usage_metrics": aggregate_usage(self.usage_records),
+        }
 
 
-def execute_step(command: str, index: int, transcript: Transcript, cwd: str, stage: str) -> protocol.StepRecord:
-    if is_external_submit(command):
-        refusal = 'The driver does not run commands that call the submission endpoint. Use action "submit".'
-        record = protocol.StepRecord(index, command, 126, "", refusal, refused="external_submit")
+# ---------------------------------------------------------------------------
+# Tools and the step loop
+# ---------------------------------------------------------------------------
+
+
+def make_backend(model: str, reasoning_effort: str | None) -> ApiBackend:
+    return ApiBackend(model, reasoning_effort)
+
+
+def build_toolbox(problem_id: str, work_dir: str) -> tuple[Toolbox, dict]:
+    """Local tools per BASELINE_TOOLS, plus the MCP sub-servers when a server is configured."""
+    local, servers = parse_tool_selection(TOOLS_RAW)
+    toolbox = Toolbox(local=local, command_timeout=COMMAND_TIMEOUT, work_dir=work_dir)
+    status: dict = {
+        "local": local,
+        "mcp_servers": servers,
+        "mcp_url": MCP_SERVER_URL or None,
+        "mcp_tools": [],
+        "mcp_error": None,
+    }
+    if servers:
+        if not MCP_SERVER_URL:
+            status["mcp_error"] = "MCP_SERVER_URL is not set"
+            logger.warning("MCP tools requested but MCP_SERVER_URL is not set; continuing without them")
+        else:
+            try:
+                mcp = McpToolbox(MCP_SERVER_URL, servers, problem_id)
+                status["mcp_tools"] = [spec.name for spec in mcp.connect()]
+                toolbox.mcp = mcp
+                logger.info(f"MCP tools: {status['mcp_tools']}")
+            except Exception as exc:
+                status["mcp_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                logger.warning(f"MCP tools unavailable: {status['mcp_error']}")
+    return toolbox, status
+
+
+def execute_tool(
+    toolbox: Toolbox, spec: ToolSpec, args: dict, transcript: Transcript, *, stage: str, index: int
+) -> str:
+    """Run one tool call and record it; returns the (truncated) text the model sees."""
+    refused = None
+    if spec.name == "bash" and is_external_submit(str(args.get("command", ""))):
+        refused = "external_submit"
+        text = "refused: the driver does not run commands that call the submission endpoint. Use the submit tool."
+        record: dict = {}
     else:
-        result = run_command(command, COMMAND_TIMEOUT, cwd=cwd)
-        record = protocol.StepRecord(
-            index, command, result.exit_code, result.stdout, result.stderr, result.duration_s, result.timed_out
-        )
+        text, record = toolbox.call(spec, args)
+    shown = protocol.truncate(text, OUTPUT_CHARS)
     transcript.write(
         {
-            "type": "command",
+            "type": "tool_call",
             "stage": stage,
-            "step": index,
-            "command": command,
-            "exit_code": record.exit_code,
-            "duration_s": record.duration_s,
-            "timed_out": record.timed_out,
-            "refused": record.refused,
-            "stdout": _stream_record(record.stdout),
-            "stderr": _stream_record(record.stderr),
+            "index": index,
+            "tool": spec.name,
+            "kind": spec.kind,
+            "args": json.dumps(args, ensure_ascii=False)[:4000],
+            "refused": refused,
+            "result": _stream_record(text),
+            **record,
         }
     )
-    return record
+    return shown
 
 
 def run_stage(
-    backend: ModelBackend,
-    app_info: dict,
+    backend: ApiBackend,
+    toolbox: Toolbox,
+    session: Session,
     transcript: Transcript,
     steps_dir: Path,
     *,
     stage: str,
     mode: str,
-    max_commands: int | None,
-    work_dir: str,
-    prior_steps: list[protocol.StepRecord] | None = None,
+    max_calls: int | None,
     call_offset: int = 0,
-    session: Session | None = None,
+    index_offset: int = 0,
 ) -> StageOutcome:
-    """Ask for one command at a time until the model submits or the budget forces a submission.
-
-    ``prior_steps`` (the diagnosis transcript) is shown but not counted in the mitigation stage.
-    With ``session`` the conversation continues across steps and stages instead of being rebuilt.
-    """
-    task_text = protocol.build_task_text(app_info)
-    prior = list(prior_steps or [])
-    steps: list[protocol.StepRecord] = []
+    """Loop until the model submits, or a limit forces the last turn with only the submit tool."""
+    submit_spec = protocol.submit_tool_spec(mode, stage)
+    started = time.monotonic()
     usage_records: list[dict] = []
     model_calls = 0
+    used = 0
+    tool_counts: dict[str, int] = {}
     consecutive_failures = 0
-    violation: list[str] | None = None
+    nudges = 0
+    guard_warned = False
     guard_tripped = False
-    started = time.monotonic()
+    forced: str | None = None
+    forced_notice_sent = False
+    notice: str | None = None
 
-    def outcome(text: str | None, reason: str) -> StageOutcome:
+    def outcome(text: str | None, reason: str, *, plain_text: bool = False) -> StageOutcome:
         return StageOutcome(
             stage,
             text,
             reason,
-            len(steps),
+            used,
             model_calls,
             usage_records,
             guard_tripped,
             round(time.monotonic() - started, 3),
-            steps,
+            tool_counts,
+            plain_text,
         )
 
-    schema_fixed = protocol.step_schema(mode, False)
-    stage_change = protocol.stage_change_text(stage) if session is not None and session.messages else None
-    last_step: protocol.StepRecord | None = None
-    unusable: str | None = None
-
     while True:
-        used = len(steps)
-        forced: str | None = None
-        if max_commands is not None and used >= max_commands:
-            forced = "budget_exhausted"
-        elif max_commands is None and used >= HARD_CAP:
-            forced = "hard_cap"
-        elif time.monotonic() - started > DEADLINE_S:
-            forced = "deadline"
-        submit_only = forced is not None
+        if forced is None:
+            if max_calls is not None and used >= max_calls:
+                forced = "budget_exhausted"
+            elif max_calls is None and used >= HARD_CAP:
+                forced = "hard_cap"
+            elif time.monotonic() - started > DEADLINE_S:
+                forced = "deadline"
+        if forced and not forced_notice_sent:
+            session.add_user(protocol.forced_submit_turn(forced.replace("_", " ")))
+            forced_notice_sent = True
+            notice = None
+        elif notice:
+            session.add_user(notice)
+            notice = None
+        tools = [submit_spec] if forced else [*toolbox.specs(), submit_spec]
+
         model_calls += 1
         call_number = call_offset + model_calls
-        step_dir = steps_dir / f"step_{call_number:02d}"
-
-        if session is None:
-            prompt = protocol.build_step_prompt(
-                task_text,
-                mode=mode,
-                max_commands=max_commands,
-                used=used,
-                steps=prior + steps,
-                submit_only=submit_only,
-                output_chars=OUTPUT_CHARS,
-                violation=violation,
-                stage=stage,
-            )
-            request_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-            result: StepResult = backend.complete_json(
-                prompt, protocol.step_schema(mode, submit_only), step_dir=step_dir
-            )
-        else:
-            if not session.messages:
-                prompt = protocol.build_step_prompt(
-                    task_text,
-                    mode=mode,
-                    max_commands=max_commands,
-                    used=used,
-                    steps=prior + steps,
-                    submit_only=submit_only,
-                    output_chars=OUTPUT_CHARS,
-                    violation=violation,
-                    stage=stage,
-                )
-                session.open(backend.system_message(schema_fixed), prompt)
-            elif session.last_role() == "assistant":
-                prompt = protocol.build_session_turn(
-                    last_step,
-                    max_commands=max_commands,
-                    used=used,
-                    next_step=len(prior) + used + 1,
-                    submit_only=submit_only,
-                    output_chars=OUTPUT_CHARS,
-                    violation=violation,
-                    stage_change=stage_change,
-                    unusable_reply=unusable,
-                )
-                session.add_user(prompt)
-            else:  # the last call failed before the model answered: resend the conversation as it is
-                prompt = str(session.messages[-1]["content"])
-            stage_change = None
-            last_step = None
-            unusable = None
-            request_sha = hashlib.sha256(json.dumps(session.messages, ensure_ascii=False).encode("utf-8")).hexdigest()
-            result = backend.complete_messages(session.messages, step_dir=step_dir)
-            if result.raw_text:
-                session.add_assistant(result.raw_text, result.reasoning)
-        usage_records.append(result.usage)
-        error = result.error or protocol.validate_step(result.parsed, mode, submit_only, stage)
+        reply = backend.complete(session.messages, tools, step_dir=steps_dir / f"step_{call_number:02d}")
+        usage_records.append(reply.usage)
         transcript.write(
             {
                 "type": "model_call",
                 "stage": stage,
                 "call": call_number,
-                "context": "stateless" if session is None else "session",
-                "messages": None if session is None else len(session.messages),
-                "commands_used": used,
-                "submit_only": submit_only,
+                "messages": len(session.messages),
+                "tools_offered": [t.name for t in tools],
                 "forced": forced,
-                "violation_notice": violation,
-                "prompt_chars": len(prompt),
-                "prompt_sha256": request_sha,
-                "latency_s": result.latency_s,
-                "usage": result.usage,
-                "raw": result.raw_text[:20000],
-                "parsed": result.parsed,
-                "repaired": result.repaired,
-                "error": error,
+                "latency_s": reply.latency_s,
+                "usage": reply.usage,
+                "finish_reason": reply.finish_reason,
+                "content": (reply.content or "")[:20000],
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments[:4000]} for tc in reply.tool_calls
+                ],
+                "error": reply.error,
             }
         )
-        if error:
+        if reply.error:
             consecutive_failures += 1
-            logger.warning(f"Model call {call_number} unusable: {error}")
+            logger.warning(f"Model call {call_number} unusable: {reply.error}")
             if consecutive_failures >= 2:
-                return outcome(FALLBACK_DIAGNOSIS if stage == "diagnosis" else "", "model_failure")
-            if session is not None and result.raw_text:
-                unusable = error
+                text = (reply.content or "").strip() if stage == "diagnosis" else ""
+                return outcome(
+                    text or (protocol.FALLBACK_DIAGNOSIS if stage == "diagnosis" else ""),
+                    "model_failure",
+                    plain_text=bool(text),
+                )
+            if reply.content or reply.tool_calls:  # something came back: keep it and say why it was unusable
+                session.add_assistant(reply)
+                for tc in reply.tool_calls:
+                    session.add_tool_result(tc.id, "not executed: the reply was unusable")
+                notice = protocol.UNUSABLE_REPLY_TEXT.format(error=reply.error)
             time.sleep(RETRY_WAIT_S)
             continue
         consecutive_failures = 0
-        parsed = result.parsed
-        assert parsed is not None
-        logger.info(f"[{stage}] call {call_number}: {parsed.get('action')} - {parsed.get('note', '')}")
+        session.add_assistant(reply)
 
-        if parsed["action"] == "submit":
-            hits = protocol.mechanism_guard_hits(parsed, mode) if stage == "diagnosis" else []
-            if hits and violation is None:
-                logger.info(f"Submission names a mechanism ({hits}); asking once more")
-                violation = hits
+        if not reply.tool_calls:
+            text = (reply.content or "").strip()
+            logger.info(f"[{stage}] call {call_number}: no tool call - {text[:120]}")
+            if forced:  # like Stratus: the plain answer is the submission
+                return outcome(
+                    text or (protocol.FALLBACK_DIAGNOSIS if stage == "diagnosis" else ""),
+                    f"{forced}_forced_submit",
+                    plain_text=True,
+                )
+            nudges += 1
+            if nudges > MAX_NUDGES:
+                forced = "no_tool_call"
+            else:
+                notice = protocol.NUDGE_TEXT
+            continue
+
+        submitted: str | None = None
+        for tc in reply.tool_calls:
+            args, parse_error = parse_arguments(tc.arguments)
+            if submitted is not None:
+                session.add_tool_result(tc.id, "skipped: the stage ended with the submission above")
                 continue
-            guard_tripped = bool(hits)
-            reason = "submitted" if forced is None else f"{forced}_forced_submit"
-            return outcome(protocol.compose_submission(parsed, mode, stage), reason)
+            if tc.name == "submit":
+                error = parse_error or protocol.validate_submit(args, mode, stage)
+                if error:
+                    session.add_tool_result(tc.id, f"rejected: {error}. Call submit again with valid arguments.")
+                    logger.info(f"[{stage}] call {call_number}: submit rejected - {error}")
+                    continue
+                assert args is not None
+                hits = protocol.mechanism_guard_hits(args, mode) if stage == "diagnosis" else []
+                if hits and not guard_warned:
+                    guard_warned = True
+                    session.add_tool_result(
+                        tc.id, protocol.GUARD_REJECTION_TEXT.format(hits=", ".join(repr(h) for h in hits))
+                    )
+                    logger.info(f"Submission names a mechanism ({hits}); asking once more")
+                    continue
+                guard_tripped = bool(hits)
+                submitted = protocol.compose_submission(args, mode, stage)
+                session.add_tool_result(tc.id, "Submission received.")
+                logger.info(f"[{stage}] call {call_number}: submit - {submitted[:160]}")
+                continue
+            spec = toolbox.find(tc.name) if not forced else None
+            if spec is None:
+                session.add_tool_result(
+                    tc.id,
+                    f"error: tool {tc.name!r} is not available" + (" at this point; only submit is" if forced else ""),
+                )
+                continue
+            if max_calls is not None and used >= max_calls:
+                session.add_tool_result(tc.id, "skipped: the tool-call budget for this stage is exhausted; call submit")
+                continue
+            if parse_error:
+                session.add_tool_result(tc.id, f"error: {parse_error}")
+                continue
+            assert args is not None
+            used += 1
+            tool_counts[tc.name] = tool_counts.get(tc.name, 0) + 1
+            logger.info(f"[{stage}] call {call_number}: {tc.name} {json.dumps(args, ensure_ascii=False)[:160]}")
+            session.add_tool_result(
+                tc.id, execute_tool(toolbox, spec, args, transcript, stage=stage, index=index_offset + used)
+            )
 
-        violation = None
-        index = len(prior) + used + 1
-        steps.append(execute_step(parsed["command"], index, transcript, work_dir, stage))
-        last_step = steps[-1]
+        if submitted is not None:
+            return outcome(submitted, "submitted" if forced is None else f"{forced}_forced_submit")
         observed = current_stage()
         if observed not in {stage, None}:
-            logger.error(f"Conductor stage is {observed} after a command; the model bypassed the submit action")
+            logger.error(f"Conductor stage is {observed} after a tool call; the model bypassed the submit tool")
             return outcome(None, "external_submission")
 
 
@@ -523,18 +506,16 @@ def save_results(path: Path, problem_id: str, return_code: int, usage: dict, bas
 
 
 def run_preflight() -> None:
-    """Validate the model path with one minimal schema-constrained call."""
-    backend = make_backend(default_backend_name(), MODEL, REASONING_EFFORT)
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"ok": {"type": "boolean"}},
-        "required": ["ok"],
-    }
+    """Validate the model path with one minimal call (no tools; the MCP server is deployed later)."""
+    backend = make_backend(MODEL, REASONING_EFFORT)
     with tempfile.TemporaryDirectory(prefix="baseline-preflight-") as tmp:
-        result = backend.complete_json('Return exactly {"ok": true}.', schema, step_dir=Path(tmp) / "preflight")
-        if result.error or not isinstance(result.parsed, dict) or result.parsed.get("ok") is not True:
-            print(result.error or f"unexpected preflight reply: {result.raw_text[:500]}")
+        reply = backend.complete(
+            [backend.system_message("Reply with the single word ok."), {"role": "user", "content": "ok?"}],
+            [],
+            step_dir=Path(tmp) / "preflight",
+        )
+        if reply.error:
+            print(reply.error)
             sys.exit(1)
     sys.exit(0)
 
@@ -549,42 +530,33 @@ def main():
     logs_dir.mkdir(parents=True, exist_ok=True)
     problem_id = resolve_problem_id(cli_problem_id=args.problem_id)
     try:
-        max_commands = parse_budget(MAX_COMMANDS_RAW)
+        max_calls = parse_budget(MAX_COMMANDS_RAW)
+        parse_tool_selection(TOOLS_RAW)
     except ValueError as e:
         logger.error(str(e))
         sys.exit(EXIT_INFRA)
     if SUBMISSION_MODE not in protocol.SUBMISSION_MODES:
         logger.error(f"BASELINE_SUBMISSION_MODE must be one of {protocol.SUBMISSION_MODES}")
         sys.exit(EXIT_INFRA)
-    if CONTEXT not in CONTEXT_MODES:
-        logger.error(f"BASELINE_CONTEXT must be one of {CONTEXT_MODES}")
-        sys.exit(EXIT_INFRA)
 
     transcript = Transcript(logs_dir / "baseline_transcript.jsonl")
     results_path = logs_dir / f"baseline_results_{problem_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    backend_name = default_backend_name()
-    backend = make_backend(backend_name, MODEL, REASONING_EFFORT)
+    backend = make_backend(MODEL, REASONING_EFFORT)
     try:
         backend_version = backend.version()
     except Exception as e:
         backend_version = f"unavailable: {e}"
-    session: Session | None = None
-    if CONTEXT == "session":
-        if not hasattr(backend, "complete_messages"):
-            logger.error(
-                f"BASELINE_CONTEXT=session needs a backend that accepts a message list; {backend.name} does not"
-            )
-            sys.exit(EXIT_INFRA)
-        session = Session(pass_reasoning=SESSION_REASONING)
+    toolbox, tool_status = build_toolbox(problem_id, str(logs_dir))
     baseline_meta: dict = {
         "backend": backend.name,
         "backend_version": backend_version,
         "model": MODEL,
         "reasoning_effort": REASONING_EFFORT,
-        "context": CONTEXT,
-        "session_reasoning": SESSION_REASONING if session is not None else None,
-        "max_commands": "unlimited" if max_commands is None else max_commands,
+        "context": "session",
+        "session_reasoning": SESSION_REASONING,
+        "max_commands": "unlimited" if max_calls is None else max_calls,
         "submission_mode": SUBMISSION_MODE,
+        "tools": tool_status,
         "hard_cap": HARD_CAP,
         "deadline_s": DEADLINE_S,
         "output_chars": OUTPUT_CHARS,
@@ -607,11 +579,18 @@ def main():
         logger.error(f"Failed to get app info: {e}")
         sys.exit(EXIT_INFRA)
 
+    task_text = protocol.build_task_text(app_info)
+    session = Session(pass_reasoning=SESSION_REASONING)
+    session.open(
+        backend.system_message(protocol.system_text(SUBMISSION_MODE)),
+        protocol.opening_turn(task_text, stage=stage, max_calls=max_calls),
+    )
+
     return_code = EXIT_OK
     usage_records: list[dict] = []
     submitted_stages: list[str] = []
-    diagnosis_steps: list[protocol.StepRecord] = []
     calls = 0
+    tool_calls = 0
 
     def finish_snapshot() -> None:
         baseline_meta["submitted_stages"] = list(submitted_stages)
@@ -620,22 +599,21 @@ def main():
     if stage == "diagnosis":
         outcome = run_stage(
             backend,
-            app_info,
+            toolbox,
+            session,
             transcript,
             logs_dir / "steps",
             stage="diagnosis",
             mode=SUBMISSION_MODE,
-            max_commands=max_commands,
-            work_dir=str(logs_dir),
-            session=session,
+            max_calls=max_calls,
         )
         usage_records.extend(outcome.usage_records)
-        diagnosis_steps = outcome.steps
         calls = outcome.model_calls
+        tool_calls = outcome.tool_calls_used
         baseline_meta["stages"]["diagnosis"] = outcome.summary()
         # Top-level copies keep the diagnosis-only fields where earlier runs put them.
         baseline_meta.update(
-            commands_used=outcome.commands_used,
+            commands_used=outcome.tool_calls_used,
             model_calls=outcome.model_calls,
             termination_reason=outcome.termination_reason,
             wall_seconds=outcome.wall_seconds,
@@ -661,22 +639,23 @@ def main():
         except TimeoutError:
             logger.warning("Timed out waiting for the stage after diagnosis")
             stage = None
+        if stage == "mitigation":
+            session.add_user(protocol.stage_change_turn(max_calls))
     else:
         logger.info("Benchmark starts at mitigation; skipping diagnosis")
 
     if stage == "mitigation":
         outcome = run_stage(
             backend,
-            app_info,
+            toolbox,
+            session,
             transcript,
             logs_dir / "steps",
             stage="mitigation",
             mode=SUBMISSION_MODE,
-            max_commands=max_commands,
-            work_dir=str(logs_dir),
-            prior_steps=diagnosis_steps,
+            max_calls=max_calls,
             call_offset=calls,
-            session=session,
+            index_offset=tool_calls,
         )
         usage_records.extend(outcome.usage_records)
         baseline_meta["stages"]["mitigation"] = outcome.summary()
@@ -701,6 +680,8 @@ def main():
     finish_snapshot()
     transcript.write({"type": "end", "stage": "run", "return_code": return_code})
     transcript.close()
+    if toolbox.mcp is not None:
+        toolbox.mcp.close()
     logger.info(f"Baseline driver finished with return code {return_code}")
     sys.exit(return_code)
 

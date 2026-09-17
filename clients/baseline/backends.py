@@ -1,12 +1,10 @@
-"""Model backends for the baseline agent: one JSON-constrained completion per step.
+"""The model side of the baseline agent: one LiteLLM chat completion per step, with tools.
 
-Two backends share one interface:
-
-* ``CodexExecBackend`` runs ``codex exec`` once per step with ``--output-schema``.
-  Every call is stateless, so the driver resends the transcript. It works with a
-  ChatGPT subscription (the mounted ``~/.codex/auth.json``) or an OpenAI API key.
-* ``ApiBackend`` goes through SREGym's LiteLLM backend (``AGENT_MODEL_ID``,
-  ``AGENT_API_BASE``, ``AGENT_API_KEY``) for people with provider keys.
+Provider-key models only (``AGENT_MODEL_ID`` as a LiteLLM model string, ``AGENT_API_BASE``,
+``AGENT_API_KEY``). Replies are streamed by default so that a long think keeps bytes flowing
+(SREGym's egress proxy drops a connection that stays silent for ten minutes) and reassembled
+into content, reasoning and tool calls. Every call has a wall-clock deadline; rate limits are
+waited out rather than treated as a failed step.
 """
 
 from __future__ import annotations
@@ -15,305 +13,50 @@ import contextlib
 import json
 import os
 import re
-import signal
-import subprocess
 import time
 from dataclasses import dataclass, field
+from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Protocol
 
+from clients.baseline.tools import ToolSpec
 from clients.harness.token_usage import token_count, usage_metrics
 
-CLI_TIMEOUT_S = 300
-DEFAULT_CODEX_HOME = "/root/.codex"
-CODEX_DISABLED_FEATURES = (
-    "shell_tool",
-    "unified_exec",
-    "apps",
-    "multi_agent",
-    "plugins",
-    "view_image",
-    "image_generation",
-    "browser_use",
-    "computer_use",
-    "skill_search",
-    "workspace_dependencies",
-)
-# Popped so a mounted subscription login is used instead of API billing, as the judge bridge does.
-API_BILLING_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+DEFAULT_API_MAX_TOKENS = 65536
+API_RETRY_WAIT_S = 5
+API_RATE_LIMIT_RETRIES = 6
+API_RATE_LIMIT_WAIT_S = 60
 
 
 @dataclass
-class StepResult:
+class ToolCall:
+    id: str
+    name: str
+    arguments: str  # raw JSON text as the model produced it
+
+
+@dataclass
+class Reply:
     """What one model call produced."""
 
-    parsed: dict | None
-    raw_text: str
-    usage: dict[str, int | None] = field(default_factory=usage_metrics)
+    content: str = ""
+    reasoning: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict = field(default_factory=usage_metrics)
+    finish_reason: str | None = None
     latency_s: float = 0.0
     error: str | None = None
-    reasoning: str | None = None  # the provider's visible reasoning, for session mode to pass back
-    repaired: bool = False  # the reply parsed only after escaping stray backslashes
 
-
-class ModelBackend(Protocol):
-    name: str
-    model: str
-
-    def version(self) -> str: ...
-
-    def complete_json(self, prompt: str, schema: dict, *, step_dir: Path) -> StepResult: ...
-
-
-def parse_codex_usage(events: list[dict]) -> dict[str, int | None]:
-    """Token usage of one ``codex exec`` call, from its last ``turn.completed`` event."""
-    usage = next((event.get("usage") for event in reversed(events) if event.get("type") == "turn.completed"), None)
-    usage = usage if isinstance(usage, dict) else {}
-    return usage_metrics(
-        input_tokens=token_count(usage.get("input_tokens")),
-        output_tokens=token_count(usage.get("output_tokens")),
-        cached_input_tokens=token_count(usage.get("cached_input_tokens")),
-        cache_creation_input_tokens=token_count(usage.get("cache_write_input_tokens")),
-        reasoning_output_tokens=token_count(usage.get("reasoning_output_tokens")),
-    )
-
-
-def read_events(path: Path) -> list[dict]:
-    events: list[dict] = []
-    if not path.exists():
-        return events
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
-
-
-# Valid JSON escapes are consumed as pairs so they stay intact; any other backslash is a stray one.
-# Shell commands are full of those (grep patterns, printf formats) and models keep emitting them unescaped.
-_ESCAPE_OR_STRAY = re.compile(r'\\["\\/bfnrtu]|\\')
-
-
-def repair_json_text(raw: str) -> str:
-    """Double stray backslashes so that the common malformed reply parses; nothing else is touched."""
-    return _ESCAPE_OR_STRAY.sub(lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
-
-
-# The step protocol's string-valued keys. A value that contains unescaped double quotes (a shell
-# command with "quoted" arguments) is recognised by what follows it: the next key or the closing brace.
-_PROTOCOL_KEYS = "action|note|command|diagnosis|faulty_component|affected_components|symptom"
-_QUOTED_FIELD = re.compile(
-    r'"(?P<key>action|note|command|diagnosis|faulty_component|symptom)"\s*:\s*"(?P<value>.*?)"'
-    r"(?P<tail>\s*(?:,\s*\"(?:" + _PROTOCOL_KEYS + r')"\s*:|\s*\}\s*$))',
-    re.DOTALL,
-)
-_UNESCAPED_QUOTE = re.compile(r'(?<!\\)"')
-
-
-def repair_inner_quotes(raw: str) -> str:
-    """Escape double quotes inside the protocol's string values; the field boundaries come from the known keys."""
-
-    def fix(match: re.Match) -> str:
-        value = _UNESCAPED_QUOTE.sub('\\"', match.group("value"))
-        return f'"{match.group("key")}": "{value}"{match.group("tail")}'
-
-    return _QUOTED_FIELD.sub(fix, raw.strip())
-
-
-# DeepSeek sometimes answers in its native tool-call markup instead of JSON, e.g.
-# <｜｜DSML｜｜ invoke name="command"> <｜｜DSML｜｜ parameter name="note" string="true">text</｜｜DSML｜｜ parameter> ...
-_DSML_INVOKE = re.compile(r"<\uff5c+DSML\uff5c+ invoke name=\"(\w+)\"")
-_DSML_PARAM = re.compile(
-    r"<\uff5c+DSML\uff5c+ parameter name=\"(\w+)\"([^>]*)>(.*?)</\uff5c+DSML\uff5c+ parameter>", re.DOTALL
-)
-
-
-def parse_dsml(raw: str) -> dict | None:
-    """Read DeepSeek's tool-call markup as the step object; None when the reply is not in that form."""
-    if "DSML" not in raw:
-        return None
-    params = _DSML_PARAM.findall(raw)
-    invoke = _DSML_INVOKE.search(raw)
-    if not params or invoke is None:
-        return None
-    parsed: dict = {"action": invoke.group(1)}
-    for name, attrs, value in params:
-        value = value.strip()
-        if 'string="false"' in attrs:
-            try:
-                parsed[name] = json.loads(value)
-            except json.JSONDecodeError:
-                parsed[name] = value
-        else:
-            parsed[name] = value
-    return parsed
-
-
-def _parse_answer(raw: str) -> tuple[dict | None, str | None, bool]:
-    """(parsed object, error, repaired): strict parse, then stray backslashes, inner quotes, DSML markup."""
-    if not raw.strip():
-        return None, "empty model reply", False
-    try:
-        parsed = json.loads(raw)
-        repaired = False
-    except json.JSONDecodeError as exc:
-        parsed = None
-        for candidate in (repair_json_text(raw), repair_json_text(repair_inner_quotes(raw))):
-            try:
-                parsed = json.loads(candidate)
-                break
-            except json.JSONDecodeError:
-                continue
-        if parsed is None:
-            parsed = parse_dsml(raw)
-        if parsed is None:
-            return None, f"reply is not valid JSON: {exc}", False
-        repaired = True
-    if not isinstance(parsed, dict):
-        return None, "reply is not a JSON object", repaired
-    return parsed, None, repaired
-
-
-class CodexExecBackend:
-    name = "codex"
-
-    def __init__(
-        self,
-        model: str,
-        reasoning_effort: str | None = None,
-        *,
-        timeout_s: int = CLI_TIMEOUT_S,
-        env: dict[str, str] | None = None,
-    ):
-        # Provider prefixes such as openai/gpt-5.5 are LiteLLM conventions, not Codex ones.
-        self.model = model.split("/")[-1]
-        self.reasoning_effort = reasoning_effort
-        self.timeout_s = timeout_s
-        self._env = dict(os.environ if env is None else env)
-
-    def environment(self) -> dict[str, str]:
-        env = dict(self._env)
-        home = Path(env.get("CODEX_HOME", DEFAULT_CODEX_HOME))
-        if (home / "auth.json").exists():
-            env["CODEX_HOME"] = str(home)
-            for key in API_BILLING_VARS:
-                env.pop(key, None)
-        return env
-
-    def version(self) -> str:
-        result = subprocess.run(
-            ["codex", "--version"], capture_output=True, text=True, timeout=30, env=self.environment()
-        )
-        return (result.stdout or result.stderr).strip()
-
-    def command(self, schema_path: Path, answer_path: Path) -> list[str]:
-        from clients.codex.codex_agent import custom_provider_args
-
-        features = ",".join(f"{key}=false" for key in CODEX_DISABLED_FEATURES)
-        command = [
-            "codex",
-            "-a",
-            "never",
-            "exec",
-            "--model",
-            self.model,
-            "--ephemeral",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
-            "-c",
-            'web_search="disabled"',
-            "-c",
-            'cli_auth_credentials_store="file"',
-            "-c",
-            f"features={{{features}}}",
-        ]
-        if self.reasoning_effort:
-            command.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
-        command.extend(custom_provider_args(self._env))
-        command.extend(["--json", "--output-schema", str(schema_path), "--output-last-message", str(answer_path), "-"])
-        return command
-
-    def complete_json(self, prompt: str, schema: dict, *, step_dir: Path) -> StepResult:
-        step_dir.mkdir(parents=True, exist_ok=True)
-        schema_path = step_dir / "schema.json"
-        answer_path = step_dir / "answer.json"
-        (step_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        schema_path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
-        answer_path.unlink(missing_ok=True)
-        command = self.command(schema_path, answer_path)
-        started = time.monotonic()
-        error: str | None = None
-        with (
-            (step_dir / "events.jsonl").open("w") as events_out,
-            (step_dir / "stderr.log").open("w") as stderr_out,
-            subprocess.Popen(
-                command,
-                cwd=step_dir,
-                env=self.environment(),
-                stdin=subprocess.PIPE,
-                stdout=events_out,
-                stderr=stderr_out,
-                text=True,
-                start_new_session=True,
-            ) as process,
-        ):
-            try:
-                process.communicate(prompt, timeout=self.timeout_s)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-                error = f"codex exec timed out after {self.timeout_s}s"
-            returncode = process.returncode
-        latency = round(time.monotonic() - started, 3)
-        events = read_events(step_dir / "events.jsonl")
-        usage = parse_codex_usage(events)
-        failed = next((event for event in events if event.get("type") == "turn.failed"), None)
-        if error is None and failed is not None:
-            error = f"codex turn failed: {json.dumps(failed)[:500]}"
-        if error is None and returncode:
-            stderr_tail = (step_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")[-500:]
-            error = f"codex exec exited {returncode}: {stderr_tail.strip()}"
-        raw = answer_path.read_text(encoding="utf-8", errors="replace") if answer_path.exists() else ""
-        parsed, parse_error, repaired = _parse_answer(raw) if error is None else (None, None, False)
-        return StepResult(
-            parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=error or parse_error, repaired=repaired
-        )
-
-
-def content_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("text") is not None:
-                parts.append(str(block["text"]))
-        return "".join(parts)
-    return str(content or "")
-
-
-def extract_json_object(text: str) -> str:
-    """The outermost ``{...}`` in a reply, with markdown fences stripped."""
-    clean = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
-    start, end = clean.find("{"), clean.rfind("}")
-    return clean[start : end + 1] if start != -1 and end > start else clean
-
-
-DEFAULT_API_MAX_TOKENS = 32768
-API_RETRY_WAIT_S = 5
-# Rate limits (HTTP 429, e.g. a subscription plan's per-window quota) are waited out rather than
-# treated as a failed step: up to API_RATE_LIMIT_RETRIES extra attempts, API_RATE_LIMIT_WAIT_S apart.
-API_RATE_LIMIT_RETRIES = 6
-API_RATE_LIMIT_WAIT_S = 60
+    def as_message(self, *, pass_reasoning: bool) -> dict:
+        """The assistant message to append to the conversation."""
+        message: dict = {"role": "assistant", "content": self.content or ""}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+                for tc in self.tool_calls
+            ]
+        if pass_reasoning and self.reasoning:
+            message["reasoning_content"] = self.reasoning
+        return message
 
 
 def is_rate_limit(exc: Exception) -> bool:
@@ -321,7 +64,30 @@ def is_rate_limit(exc: Exception) -> bool:
     return "ratelimit" in text or "rate limit" in text or "429" in text or "too many requests" in text
 
 
-def parse_api_usage(usage: object) -> dict[str, int | None]:
+# Valid JSON escapes are consumed as pairs so they stay intact; any other backslash is a stray one.
+_ESCAPE_OR_STRAY = re.compile(r'\\["\\/bfnrtu]|\\')
+
+
+def repair_json_text(raw: str) -> str:
+    """Double stray backslashes so that a shell-command argument with ``\\d`` or ``\\n`` still parses."""
+    return _ESCAPE_OR_STRAY.sub(lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
+
+
+def parse_arguments(raw: str) -> tuple[dict | None, str | None]:
+    """Tool-call arguments as a dict, or an error message."""
+    text = (raw or "").strip() or "{}"
+    for candidate in (text, repair_json_text(text)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed, None
+        return None, "tool arguments are not a JSON object"
+    return None, f"tool arguments are not valid JSON: {text[:120]}"
+
+
+def parse_api_usage(usage: object) -> dict:
     """Map an OpenAI-style usage block (LiteLLM or raw) to SREGym's token metrics."""
 
     def get(obj, key):
@@ -339,18 +105,7 @@ def parse_api_usage(usage: object) -> dict[str, int | None]:
     )
 
 
-@dataclass
-class Reply:
-    """What one completion returned, whichever way it was transported."""
-
-    content: str = ""
-    reasoning: str | None = None
-    usage: object = None
-    finish_reason: str | None = None
-
-
 def _reasoning_of(message: object) -> str | None:
-    """The provider's visible reasoning on a message or a stream delta, if any."""
     reasoning = getattr(message, "reasoning_content", None)
     if not reasoning:
         fields = getattr(message, "provider_specific_fields", None)
@@ -358,15 +113,30 @@ def _reasoning_of(message: object) -> str | None:
     return str(reasoning) if reasoning else None
 
 
-class ApiBackend:
-    """Provider-key path: one LiteLLM chat completion per step.
+def _reply_from_response(response) -> Reply:
+    choice = response.choices[0]
+    message = choice.message
+    calls = []
+    for tc in getattr(message, "tool_calls", None) or []:
+        function = getattr(tc, "function", None)
+        calls.append(
+            ToolCall(
+                str(getattr(tc, "id", "") or f"call_{len(calls)}"),
+                str(getattr(function, "name", "") or ""),
+                str(getattr(function, "arguments", "") or ""),
+            )
+        )
+    return Reply(
+        content=message.content or "",
+        reasoning=_reasoning_of(message),
+        tool_calls=calls,
+        usage=parse_api_usage(getattr(response, "usage", None)),
+        finish_reason=getattr(choice, "finish_reason", None),
+    )
 
-    Reads ``AGENT_MODEL_ID`` (LiteLLM model string, e.g. ``openai/glm-5.3`` for an
-    OpenAI-compatible endpoint), ``AGENT_API_BASE`` and ``AGENT_API_KEY``. Extra
-    request fields such as a provider's thinking switch come from
-    ``BASELINE_EXTRA_BODY`` (JSON); ``AGENT_REASONING_EFFORT`` is forwarded as
-    ``reasoning_effort`` when set.
-    """
+
+class ApiBackend:
+    """One LiteLLM chat completion per step, with tools."""
 
     name = "api"
 
@@ -379,35 +149,28 @@ class ApiBackend:
         self.max_tokens = int(source.get("BASELINE_MAX_TOKENS", DEFAULT_API_MAX_TOKENS))
         self.extra_body = json.loads(source.get("BASELINE_EXTRA_BODY") or "{}")
         self.timeout_s = int(source.get("BASELINE_API_TIMEOUT", "600"))
-        # Wall-clock bound on one call, enforced by the driver itself: a provider that keeps the
-        # connection open without sending bytes never trips the HTTP read timeout.
+        # Wall-clock bound on one call, enforced here: a provider that keeps the connection open
+        # without sending bytes never trips the HTTP read timeout.
         self.hard_deadline_s = float(source.get("BASELINE_API_HARD_DEADLINE_S", str(self.timeout_s + 60)))
-        # Streaming keeps bytes flowing while the model thinks: SREGym's egress proxy drops a
-        # connection that stays silent for 10 minutes, which a long non-streamed reply can exceed.
         self.stream = source.get("BASELINE_API_STREAM", "1") != "0"
 
     def version(self) -> str:
-        from importlib.metadata import version
+        return f"litellm {package_version('litellm')}"
 
-        return f"litellm {version('litellm')}"
+    @staticmethod
+    def system_message(text: str) -> dict:
+        return {"role": "system", "content": text}
 
-    def system_message(self, schema: dict) -> dict:
-        return {
-            "role": "system",
-            "content": (
-                "You are an SRE agent. Reply with exactly one JSON object matching this JSON schema and nothing else, "
-                "no markdown fences and no commentary:\n" + json.dumps(schema)
-            ),
-        }
-
-    def build_request(self, messages: list[dict]) -> dict:
-        request = {
+    def build_request(self, messages: list[dict], tools: list[ToolSpec]) -> dict:
+        request: dict = {
             "model": self.model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": self.max_tokens,
             "timeout": self.timeout_s,
         }
+        if tools:
+            request["tools"] = [spec.as_openai() for spec in tools]
         if self.api_base:
             request["api_base"] = self.api_base
         if self.api_key:
@@ -419,89 +182,14 @@ class ApiBackend:
             request["extra_body"] = extra
         return request
 
-    def request(self, prompt: str, schema: dict) -> dict:
-        return self.build_request([self.system_message(schema), {"role": "user", "content": prompt}])
-
-    def complete_json(self, prompt: str, schema: dict, *, step_dir: Path) -> StepResult:
-        step_dir.mkdir(parents=True, exist_ok=True)
-        (step_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        (step_dir / "schema.json").write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
-        return self._call(self.request(prompt, schema), step_dir)
-
-    def complete_messages(self, messages: list[dict], *, step_dir: Path) -> StepResult:
-        """Session mode: the driver owns the conversation and this sends it unchanged."""
+    def complete(self, messages: list[dict], tools: list[ToolSpec], *, step_dir: Path) -> Reply:
+        """Send the conversation with the tool list; record what was sent and what came back."""
         step_dir.mkdir(parents=True, exist_ok=True)
         (step_dir / "messages.json").write_text(
             json.dumps(messages, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
-        (step_dir / "prompt.txt").write_text(str(last_user), encoding="utf-8")
-        return self._call(self.build_request(messages), step_dir)
-
-    def _completion_with_deadline(self, request: dict) -> Reply:
-        """One completion, streamed or not, that gives up at the wall-clock deadline."""
-        if self.stream:
-            return self._stream(request)
-        import threading
-
-        import litellm
-
-        box: dict = {}
-
-        def work() -> None:
-            try:
-                box["response"] = litellm.completion(**request)
-            except Exception as exc:  # reported by the caller
-                box["exception"] = exc
-
-        worker = threading.Thread(target=work, daemon=True)
-        worker.start()
-        worker.join(self.hard_deadline_s)
-        if worker.is_alive():  # the thread dies with the process
-            raise TimeoutError(f"no reply within the hard deadline of {self.hard_deadline_s:.0f}s")
-        if "exception" in box:
-            raise box["exception"]
-        response = box["response"]
-        message = response.choices[0].message
-        return Reply(
-            content=message.content or "",
-            reasoning=_reasoning_of(message),
-            usage=getattr(response, "usage", None),
-            finish_reason=getattr(response.choices[0], "finish_reason", None),
-        )
-
-    def _stream(self, request: dict) -> Reply:
-        """Accumulate a streamed reply; the deadline is checked between chunks and the stream closed on expiry."""
-        import litellm
-
-        deadline = time.monotonic() + self.hard_deadline_s
-        reply = Reply()
-        stream = litellm.completion(**request, stream=True, stream_options={"include_usage": True})
-        try:
-            for chunk in stream:
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"reply still streaming at the hard deadline of {self.hard_deadline_s:.0f}s")
-                if getattr(chunk, "usage", None):
-                    reply.usage = chunk.usage
-                choices = getattr(chunk, "choices", None) or []
-                if not choices:
-                    continue
-                delta = choices[0].delta
-                if getattr(delta, "content", None):
-                    reply.content += delta.content
-                reasoning = _reasoning_of(delta)
-                if reasoning:
-                    reply.reasoning = (reply.reasoning or "") + reasoning
-                if getattr(choices[0], "finish_reason", None):
-                    reply.finish_reason = choices[0].finish_reason
-        finally:
-            close = getattr(stream, "close", None)
-            if callable(close):
-                with contextlib.suppress(Exception):
-                    close()
-        return reply
-
-    def _call(self, request: dict, step_dir: Path) -> StepResult:
+        (step_dir / "tools.json").write_text(json.dumps([s.name for s in tools]) + "\n", encoding="utf-8")
+        request = self.build_request(messages, tools)
         started = time.monotonic()
         reply: Reply | None = None
         error: str | None = None
@@ -525,21 +213,83 @@ class ApiBackend:
         latency = round(time.monotonic() - started, 3)
         if reply is None:
             (step_dir / "stderr.log").write_text(error or "", encoding="utf-8")
-            return StepResult(None, "", latency_s=latency, error=error)
-        raw = reply.content
-        (step_dir / "answer.json").write_text(raw, encoding="utf-8")
+            return Reply(latency_s=latency, error=error)
+        reply.latency_s = latency
+        (step_dir / "answer.json").write_text(
+            json.dumps(
+                {
+                    "content": reply.content,
+                    "tool_calls": [tc.__dict__ for tc in reply.tool_calls],
+                    "finish_reason": reply.finish_reason,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         if reply.reasoning:
             (step_dir / "reasoning.txt").write_text(reply.reasoning, encoding="utf-8")
-        usage = parse_api_usage(reply.usage)
-        parsed, parse_error, repaired = _parse_answer(extract_json_object(raw))
-        if parse_error and reply.finish_reason == "length":
-            parse_error = f"{parse_error} (output truncated at max_tokens={self.max_tokens})"
-        return StepResult(
-            parsed=parsed,
-            raw_text=raw,
-            usage=usage,
-            latency_s=latency,
-            error=parse_error,
-            reasoning=reply.reasoning,
-            repaired=repaired,
-        )
+        if not reply.content and not reply.tool_calls:
+            reply.error = "empty model reply" + (
+                f" (output truncated at max_tokens={self.max_tokens})" if reply.finish_reason == "length" else ""
+            )
+        return reply
+
+    def _completion_with_deadline(self, request: dict) -> Reply:
+        if self.stream:
+            return self._stream(request)
+        import threading
+
+        import litellm
+
+        box: dict = {}
+
+        def work() -> None:
+            try:
+                box["response"] = litellm.completion(**request)
+            except Exception as exc:  # reported by the caller
+                box["exception"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        worker.join(self.hard_deadline_s)
+        if worker.is_alive():  # the thread dies with the process
+            raise TimeoutError(f"no reply within the hard deadline of {self.hard_deadline_s:.0f}s")
+        if "exception" in box:
+            raise box["exception"]
+        return _reply_from_response(box["response"])
+
+    def _stream(self, request: dict) -> Reply:
+        """Collect the streamed chunks (deadline checked between chunks) and rebuild the reply."""
+        import litellm
+
+        deadline = time.monotonic() + self.hard_deadline_s
+        chunks = []
+        stream = litellm.completion(**request, stream=True, stream_options={"include_usage": True})
+        try:
+            for chunk in stream:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"reply still streaming at the hard deadline of {self.hard_deadline_s:.0f}s")
+                chunks.append(chunk)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+        if not chunks:
+            raise RuntimeError("empty stream")
+        response = litellm.stream_chunk_builder(chunks, messages=request["messages"])
+        reply = _reply_from_response(response)
+        if reply.reasoning is None:  # the builder may drop provider fields; take them from the deltas
+            pieces = []
+            for chunk in chunks:
+                for choice in getattr(chunk, "choices", None) or []:
+                    text = _reasoning_of(getattr(choice, "delta", None))
+                    if text:
+                        pieces.append(text)
+            reply.reasoning = "".join(pieces) or None
+        if reply.usage.get("input_tokens") is None:
+            usage = next((getattr(c, "usage", None) for c in reversed(chunks) if getattr(c, "usage", None)), None)
+            reply.usage = parse_api_usage(usage)
+        return reply
