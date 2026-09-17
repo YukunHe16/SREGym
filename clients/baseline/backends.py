@@ -102,19 +102,45 @@ def repair_json_text(raw: str) -> str:
     return _ESCAPE_OR_STRAY.sub(lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
 
 
+# The step protocol's string-valued keys. A value that contains unescaped double quotes (a shell
+# command with "quoted" arguments) is recognised by what follows it: the next key or the closing brace.
+_PROTOCOL_KEYS = "action|note|command|diagnosis|faulty_component|affected_components|symptom"
+_QUOTED_FIELD = re.compile(
+    r'"(?P<key>action|note|command|diagnosis|faulty_component|symptom)"\s*:\s*"(?P<value>.*?)"'
+    r"(?P<tail>\s*(?:,\s*\"(?:" + _PROTOCOL_KEYS + r')"\s*:|\s*\}\s*$))',
+    re.DOTALL,
+)
+_UNESCAPED_QUOTE = re.compile(r'(?<!\\)"')
+
+
+def repair_inner_quotes(raw: str) -> str:
+    """Escape double quotes inside the protocol's string values; the field boundaries come from the known keys."""
+
+    def fix(match: re.Match) -> str:
+        value = _UNESCAPED_QUOTE.sub('\\"', match.group("value"))
+        return f'"{match.group("key")}": "{value}"{match.group("tail")}'
+
+    return _QUOTED_FIELD.sub(fix, raw.strip())
+
+
 def _parse_answer(raw: str) -> tuple[dict | None, str | None, bool]:
-    """(parsed object, error, repaired): strict parse first, then the backslash repair."""
+    """(parsed object, error, repaired): strict parse, then stray backslashes, then inner quotes."""
     if not raw.strip():
         return None, "empty model reply", False
-    repaired = False
     try:
         parsed = json.loads(raw)
+        repaired = False
     except json.JSONDecodeError as exc:
-        try:
-            parsed = json.loads(repair_json_text(raw))
-            repaired = True
-        except json.JSONDecodeError:
+        parsed = None
+        for candidate in (repair_json_text(raw), repair_json_text(repair_inner_quotes(raw))):
+            try:
+                parsed = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+        if parsed is None:
             return None, f"reply is not valid JSON: {exc}", False
+        repaired = True
     if not isinstance(parsed, dict):
         return None, "reply is not a JSON object", repaired
     return parsed, None, repaired

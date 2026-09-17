@@ -542,6 +542,28 @@ def test_parse_answer_repairs_stray_backslashes_only():
     assert parsed is None and "not valid JSON" in error and repaired is False
 
 
+def test_parse_answer_repairs_unescaped_quotes_inside_protocol_fields():
+    from clients.baseline.backends import _parse_answer
+
+    raw = (
+        '{"action": "command", "note": "Inspect mongo", "command": "kubectl exec deploy/mongo -- mongo --eval '
+        '\'db = db.getSiblingDB("social-graph"); db.stats()\'", "diagnosis": null}'
+    ).replace('\\"', '"')
+    assert '"social-graph"' in raw  # the quotes really are unescaped
+    parsed, error, repaired = _parse_answer(raw)
+    assert error is None and repaired is True
+    assert parsed["command"].endswith('getSiblingDB("social-graph"); db.stats()\'') and parsed["diagnosis"] is None
+    both = '{"action": "command", "note": "n", "command": "grep -E \\d+ "a b" file", "diagnosis": null}'.replace(
+        '\\"', '"'
+    )
+    parsed, error, repaired = _parse_answer(both)
+    assert error is None and repaired is True and parsed["command"] == 'grep -E \\d+ "a b" file'
+    # a value that is the last field, followed by the closing brace
+    last = '{"action": "submit", "note": "n", "command": null, "diagnosis": "the "frontend" pod fails"}'
+    parsed, error, repaired = _parse_answer(last)
+    assert error is None and parsed["diagnosis"] == 'the "frontend" pod fails'
+
+
 def test_api_backend_reports_repaired_replies(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
