@@ -482,6 +482,51 @@ def test_api_backend_stops_a_stream_at_the_hard_deadline(tmp_path, monkeypatch):
     assert result.parsed is None and "hard deadline" in (result.error or "") and closed == [True, True]
 
 
+def test_api_backend_waits_out_rate_limits_then_gives_up(tmp_path, monkeypatch):
+    import litellm
+
+    from clients.baseline import backends
+    from clients.baseline.backends import ApiBackend
+
+    backend = ApiBackend(
+        "openai/glm-5.3",
+        None,
+        env={"AGENT_API_BASE": "https://example.invalid/v1", "AGENT_API_KEY": "k", "BASELINE_API_STREAM": "0"},
+    )
+    monkeypatch.setattr(backends, "API_RATE_LIMIT_WAIT_S", 0)
+    monkeypatch.setattr(backends, "API_RETRY_WAIT_S", 0)
+    monkeypatch.setattr(backends, "API_RATE_LIMIT_RETRIES", 3)
+    calls = []
+
+    class RateLimitError(Exception):
+        pass
+
+    def limited(**kwargs):
+        calls.append(1)
+        raise RateLimitError("429 Too Many Requests: quota exhausted for this window")
+
+    monkeypatch.setattr(litellm, "completion", limited)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    # 3 waited-out rate-limit attempts, then the usual two plain attempts
+    assert len(calls) == 5 and "RateLimitError" in (result.error or "")
+
+    calls.clear()
+    from types import SimpleNamespace
+
+    def limited_then_ok(**kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RateLimitError("429")
+        message = SimpleNamespace(
+            content='{"action": "submit", "note": "n", "command": null, "diagnosis": "d"}', reasoning_content=None
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr(litellm, "completion", limited_then_ok)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s2")
+    assert result.error is None and result.parsed["diagnosis"] == "d" and len(calls) == 3
+
+
 def test_parse_budget():
     assert driver.parse_budget("0") == 0
     assert driver.parse_budget("3") == 3

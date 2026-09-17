@@ -234,6 +234,15 @@ def extract_json_object(text: str) -> str:
 
 DEFAULT_API_MAX_TOKENS = 32768
 API_RETRY_WAIT_S = 5
+# Rate limits (HTTP 429, e.g. a subscription plan's per-window quota) are waited out rather than
+# treated as a failed step: up to API_RATE_LIMIT_RETRIES extra attempts, API_RATE_LIMIT_WAIT_S apart.
+API_RATE_LIMIT_RETRIES = 6
+API_RATE_LIMIT_WAIT_S = 60
+
+
+def is_rate_limit(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return "ratelimit" in text or "rate limit" in text or "429" in text or "too many requests" in text
 
 
 def parse_api_usage(usage: object) -> dict[str, int | None]:
@@ -420,15 +429,23 @@ class ApiBackend:
         started = time.monotonic()
         reply: Reply | None = None
         error: str | None = None
-        for attempt in range(2):
+        plain_attempts = 0
+        rate_limit_attempts = 0
+        while True:
             try:
                 reply = self._completion_with_deadline(request)
                 error = None
                 break
             except Exception as exc:  # provider or transport error; the driver decides what a failed step means
                 error = f"model call failed: {type(exc).__name__}: {str(exc)[:300]}"
-                if attempt == 0:
-                    time.sleep(API_RETRY_WAIT_S)
+                if is_rate_limit(exc) and rate_limit_attempts < API_RATE_LIMIT_RETRIES:
+                    rate_limit_attempts += 1
+                    time.sleep(API_RATE_LIMIT_WAIT_S)
+                    continue
+                plain_attempts += 1
+                if plain_attempts >= 2:
+                    break
+                time.sleep(API_RETRY_WAIT_S)
         latency = round(time.monotonic() - started, 3)
         if reply is None:
             (step_dir / "stderr.log").write_text(error or "", encoding="utf-8")
