@@ -52,6 +52,7 @@ class StepResult:
     usage: dict[str, int | None] = field(default_factory=usage_metrics)
     latency_s: float = 0.0
     error: str | None = None
+    reasoning: str | None = None  # the provider's visible reasoning, for session mode to pass back
 
 
 class ModelBackend(Protocol):
@@ -231,53 +232,215 @@ def extract_json_object(text: str) -> str:
     return clean[start : end + 1] if start != -1 and end > start else clean
 
 
+DEFAULT_API_MAX_TOKENS = 32768
+API_RETRY_WAIT_S = 5
+
+
+def parse_api_usage(usage: object) -> dict[str, int | None]:
+    """Map an OpenAI-style usage block (LiteLLM or raw) to SREGym's token metrics."""
+
+    def get(obj, key):
+        if obj is None:
+            return None
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    prompt_details = get(usage, "prompt_tokens_details")
+    completion_details = get(usage, "completion_tokens_details")
+    return usage_metrics(
+        input_tokens=token_count(get(usage, "prompt_tokens")),
+        output_tokens=token_count(get(usage, "completion_tokens")),
+        cached_input_tokens=token_count(get(prompt_details, "cached_tokens")),
+        reasoning_output_tokens=token_count(get(completion_details, "reasoning_tokens")),
+    )
+
+
+@dataclass
+class Reply:
+    """What one completion returned, whichever way it was transported."""
+
+    content: str = ""
+    reasoning: str | None = None
+    usage: object = None
+    finish_reason: str | None = None
+
+
+def _reasoning_of(message: object) -> str | None:
+    """The provider's visible reasoning on a message or a stream delta, if any."""
+    reasoning = getattr(message, "reasoning_content", None)
+    if not reasoning:
+        fields = getattr(message, "provider_specific_fields", None)
+        reasoning = fields.get("reasoning_content") if isinstance(fields, dict) else None
+    return str(reasoning) if reasoning else None
+
+
 class ApiBackend:
-    """Provider-key path through SREGym's LiteLLM wrapper."""
+    """Provider-key path: one LiteLLM chat completion per step.
+
+    Reads ``AGENT_MODEL_ID`` (LiteLLM model string, e.g. ``openai/glm-5.3`` for an
+    OpenAI-compatible endpoint), ``AGENT_API_BASE`` and ``AGENT_API_KEY``. Extra
+    request fields such as a provider's thinking switch come from
+    ``BASELINE_EXTRA_BODY`` (JSON); ``AGENT_REASONING_EFFORT`` is forwarded as
+    ``reasoning_effort`` when set.
+    """
 
     name = "api"
 
-    def __init__(self, model: str, reasoning_effort: str | None = None):
+    def __init__(self, model: str, reasoning_effort: str | None = None, *, env: dict[str, str] | None = None):
+        source = os.environ if env is None else env
         self.model = model
         self.reasoning_effort = reasoning_effort
-        self._backend = None
-
-    def _get(self):
-        if self._backend is None:
-            from llm_backend.init_backend import get_llm_backend_for_agent
-
-            self._backend = get_llm_backend_for_agent()
-        return self._backend
+        self.api_base = source.get("AGENT_API_BASE") or None
+        self.api_key = source.get("AGENT_API_KEY") or None
+        self.max_tokens = int(source.get("BASELINE_MAX_TOKENS", DEFAULT_API_MAX_TOKENS))
+        self.extra_body = json.loads(source.get("BASELINE_EXTRA_BODY") or "{}")
+        self.timeout_s = int(source.get("BASELINE_API_TIMEOUT", "600"))
+        # Wall-clock bound on one call, enforced by the driver itself: a provider that keeps the
+        # connection open without sending bytes never trips the HTTP read timeout.
+        self.hard_deadline_s = float(source.get("BASELINE_API_HARD_DEADLINE_S", str(self.timeout_s + 60)))
+        # Streaming keeps bytes flowing while the model thinks: SREGym's egress proxy drops a
+        # connection that stays silent for 10 minutes, which a long non-streamed reply can exceed.
+        self.stream = source.get("BASELINE_API_STREAM", "1") != "0"
 
     def version(self) -> str:
-        return "litellm"
+        from importlib.metadata import version
+
+        return f"litellm {version('litellm')}"
+
+    def system_message(self, schema: dict) -> dict:
+        return {
+            "role": "system",
+            "content": (
+                "You are an SRE agent. Reply with exactly one JSON object matching this JSON schema and nothing else, "
+                "no markdown fences and no commentary:\n" + json.dumps(schema)
+            ),
+        }
+
+    def build_request(self, messages: list[dict]) -> dict:
+        request = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": self.max_tokens,
+            "timeout": self.timeout_s,
+        }
+        if self.api_base:
+            request["api_base"] = self.api_base
+        if self.api_key:
+            request["api_key"] = self.api_key
+        extra = dict(self.extra_body)
+        if self.reasoning_effort:
+            extra["reasoning_effort"] = self.reasoning_effort
+        if extra:
+            request["extra_body"] = extra
+        return request
+
+    def request(self, prompt: str, schema: dict) -> dict:
+        return self.build_request([self.system_message(schema), {"role": "user", "content": prompt}])
 
     def complete_json(self, prompt: str, schema: dict, *, step_dir: Path) -> StepResult:
         step_dir.mkdir(parents=True, exist_ok=True)
         (step_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         (step_dir / "schema.json").write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
-        system = (
-            "You are an SRE agent. Reply with exactly one JSON object matching this JSON schema and nothing else:\n"
+        return self._call(self.request(prompt, schema), step_dir)
+
+    def complete_messages(self, messages: list[dict], *, step_dir: Path) -> StepResult:
+        """Session mode: the driver owns the conversation and this sends it unchanged."""
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / "messages.json").write_text(
+            json.dumps(messages, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        system += json.dumps(schema)
-        started = time.monotonic()
+        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+        (step_dir / "prompt.txt").write_text(str(last_user), encoding="utf-8")
+        return self._call(self.build_request(messages), step_dir)
+
+    def _completion_with_deadline(self, request: dict) -> Reply:
+        """One completion, streamed or not, that gives up at the wall-clock deadline."""
+        if self.stream:
+            return self._stream(request)
+        import threading
+
+        import litellm
+
+        box: dict = {}
+
+        def work() -> None:
+            try:
+                box["response"] = litellm.completion(**request)
+            except Exception as exc:  # reported by the caller
+                box["exception"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        worker.join(self.hard_deadline_s)
+        if worker.is_alive():  # the thread dies with the process
+            raise TimeoutError(f"no reply within the hard deadline of {self.hard_deadline_s:.0f}s")
+        if "exception" in box:
+            raise box["exception"]
+        response = box["response"]
+        message = response.choices[0].message
+        return Reply(
+            content=message.content or "",
+            reasoning=_reasoning_of(message),
+            usage=getattr(response, "usage", None),
+            finish_reason=getattr(response.choices[0], "finish_reason", None),
+        )
+
+    def _stream(self, request: dict) -> Reply:
+        """Accumulate a streamed reply; the deadline is checked between chunks and the stream closed on expiry."""
+        import litellm
+
+        deadline = time.monotonic() + self.hard_deadline_s
+        reply = Reply()
+        stream = litellm.completion(**request, stream=True, stream_options={"include_usage": True})
         try:
-            response = self._get().inference(prompt, system_prompt=system)
-        except Exception as exc:
-            return StepResult(
-                None, "", latency_s=round(time.monotonic() - started, 3), error=f"model call failed: {exc}"
-            )
+            for chunk in stream:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"reply still streaming at the hard deadline of {self.hard_deadline_s:.0f}s")
+                if getattr(chunk, "usage", None):
+                    reply.usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = choices[0].delta
+                if getattr(delta, "content", None):
+                    reply.content += delta.content
+                reasoning = _reasoning_of(delta)
+                if reasoning:
+                    reply.reasoning = (reply.reasoning or "") + reasoning
+                if getattr(choices[0], "finish_reason", None):
+                    reply.finish_reason = choices[0].finish_reason
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+        return reply
+
+    def _call(self, request: dict, step_dir: Path) -> StepResult:
+        started = time.monotonic()
+        reply: Reply | None = None
+        error: str | None = None
+        for attempt in range(2):
+            try:
+                reply = self._completion_with_deadline(request)
+                error = None
+                break
+            except Exception as exc:  # provider or transport error; the driver decides what a failed step means
+                error = f"model call failed: {type(exc).__name__}: {str(exc)[:300]}"
+                if attempt == 0:
+                    time.sleep(API_RETRY_WAIT_S)
         latency = round(time.monotonic() - started, 3)
-        raw = content_text(getattr(response, "content", response))
+        if reply is None:
+            (step_dir / "stderr.log").write_text(error or "", encoding="utf-8")
+            return StepResult(None, "", latency_s=latency, error=error)
+        raw = reply.content
         (step_dir / "answer.json").write_text(raw, encoding="utf-8")
-        meta = getattr(response, "usage_metadata", None) or {}
-        input_details = meta.get("input_token_details") or {}
-        output_details = meta.get("output_token_details") or {}
-        usage = usage_metrics(
-            input_tokens=token_count(meta.get("input_tokens")),
-            output_tokens=token_count(meta.get("output_tokens")),
-            cached_input_tokens=token_count(input_details.get("cache_read")),
-            cache_creation_input_tokens=token_count(input_details.get("cache_creation")),
-            reasoning_output_tokens=token_count(output_details.get("reasoning")),
+        if reply.reasoning:
+            (step_dir / "reasoning.txt").write_text(reply.reasoning, encoding="utf-8")
+        usage = parse_api_usage(reply.usage)
+        parsed, parse_error = _parse_answer(extract_json_object(raw))
+        if parse_error and reply.finish_reason == "length":
+            parse_error = f"{parse_error} (output truncated at max_tokens={self.max_tokens})"
+        return StepResult(
+            parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=parse_error, reasoning=reply.reasoning
         )
-        parsed, error = _parse_answer(extract_json_object(raw))
-        return StepResult(parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=error)

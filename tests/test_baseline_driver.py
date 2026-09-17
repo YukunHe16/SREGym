@@ -37,6 +37,35 @@ class FakeBackend:
         return StepResult(parsed=reply, raw_text=json.dumps(reply), usage=usage, latency_s=0.1)
 
 
+class FakeSessionBackend(FakeBackend):
+    """A backend that accepts the driver's message list, like ApiBackend does in session mode."""
+
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.sessions: list[list[dict]] = []
+
+    def system_message(self, schema):
+        return {"role": "system", "content": "JSON only. " + json.dumps(schema)}
+
+    def complete_messages(self, messages, *, step_dir):
+        import copy
+
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / "messages.json").write_text(json.dumps(messages))
+        self.sessions.append(copy.deepcopy(messages))
+        reply = self.replies.pop(0)
+        if isinstance(reply, StepResult):
+            return reply
+        usage = usage_metrics(input_tokens=100, output_tokens=10, cached_input_tokens=50, reasoning_output_tokens=5)
+        return StepResult(
+            parsed=reply,
+            raw_text=json.dumps(reply),
+            usage=usage,
+            latency_s=0.1,
+            reasoning=f"thinking {len(self.sessions)}",
+        )
+
+
 def command(cmd):
     return {"action": "command", "note": "look", "command": cmd, "diagnosis": None}
 
@@ -58,13 +87,18 @@ def submit_nomech(component, affected, symptom):
 
 @pytest.fixture
 def harness(monkeypatch, tmp_path):
-    state = {"stages": ["diagnosis", "done"], "submissions": [], "commands": [], "logs": tmp_path}
+    state = {"stages": ["diagnosis", "done"], "submissions": [], "commands": [], "logs": tmp_path, "current": None}
     monkeypatch.setattr(driver, "AGENT_LOGS_DIR", str(tmp_path))
     monkeypatch.setattr(driver, "RETRY_WAIT_S", 0)
     monkeypatch.setattr(driver, "resolve_problem_id", lambda cli_problem_id=None: "anon_test")
     monkeypatch.setattr(driver, "get_app_info", lambda: APP)
-    monkeypatch.setattr(driver, "current_stage", lambda: "diagnosis")
-    monkeypatch.setattr(driver, "wait_for_stage", lambda stages, timeout: state["stages"].pop(0))
+    monkeypatch.setattr(driver, "current_stage", lambda: state["current"])
+
+    def wait_for_stage(stages, timeout):
+        state["current"] = state["stages"].pop(0)
+        return state["current"]
+
+    monkeypatch.setattr(driver, "wait_for_stage", wait_for_stage)
 
     def submit_to_conductor(solution, stage):
         state["submissions"].append((solution, stage))
@@ -81,10 +115,11 @@ def harness(monkeypatch, tmp_path):
     return state
 
 
-def run_main(monkeypatch, backend, *, max_commands="10", mode="full", hard_cap=60):
+def run_main(monkeypatch, backend, *, max_commands="10", mode="full", hard_cap=60, context="stateless"):
     monkeypatch.setattr(driver, "MAX_COMMANDS_RAW", max_commands)
     monkeypatch.setattr(driver, "SUBMISSION_MODE", mode)
     monkeypatch.setattr(driver, "HARD_CAP", hard_cap)
+    monkeypatch.setattr(driver, "CONTEXT", context)
     monkeypatch.setattr(driver, "make_backend", lambda name, model, effort: backend)
     with pytest.raises(SystemExit) as exc:
         driver.main()
@@ -201,20 +236,46 @@ def test_two_bad_replies_submit_the_fallback_and_exit_2(monkeypatch, harness):
     assert results["baseline"]["termination_reason"] == "model_failure"
 
 
-def test_mitigation_stage_gets_the_empty_submission(monkeypatch, harness):
+def test_mitigation_stage_runs_the_loop_and_sends_the_empty_submission(monkeypatch, harness):
     harness["stages"] = ["diagnosis", "mitigation", "done"]
-    backend = FakeBackend([submit(DIAGNOSIS)])
-    assert run_main(monkeypatch, backend, max_commands="0") == 0
+    backend = FakeBackend(
+        [
+            submit(DIAGNOSIS),
+            command("kubectl patch svc frontend -n hotel-reservation -p '{}'"),
+            {"action": "submit", "note": "fixed", "command": None, "diagnosis": None},
+        ]
+    )
+    assert run_main(monkeypatch, backend, max_commands="10") == 0
     assert harness["submissions"] == [(DIAGNOSIS, "diagnosis"), ("", "mitigation")]
-    assert read_results(harness["logs"])["baseline"]["submitted_stages"] == ["diagnosis", "mitigation"]
+    assert harness["commands"] == ["kubectl patch svc frontend -n hotel-reservation -p '{}'"]
+    mitigation_prompt = backend.calls[1][0]
+    assert "[MITIGATION STAGE]" in mitigation_prompt and "Current stage: mitigation" in mitigation_prompt
+    results = read_results(harness["logs"])
+    assert results["baseline"]["submitted_stages"] == ["diagnosis", "mitigation"]
+    assert results["baseline"]["stages"]["diagnosis"]["commands_used"] == 0
+    assert results["baseline"]["stages"]["mitigation"]["commands_used"] == 1
+    assert results["baseline"]["stages"]["mitigation"]["termination_reason"] == "submitted"
+    assert results["usage_metrics"]["input_tokens"] == 300
+    assert (harness["logs"] / "steps" / "step_03").exists()
 
 
-def test_attempt_starting_at_mitigation_skips_the_model(monkeypatch, harness):
+def test_mitigation_transcript_carries_the_diagnosis_steps(monkeypatch, harness):
+    harness["stages"] = ["diagnosis", "mitigation", "done"]
+    backend = FakeBackend([command("kubectl get pods"), submit(DIAGNOSIS), submit("")])
+    assert run_main(monkeypatch, backend, max_commands="10") == 0
+    mitigation_prompt = backend.calls[2][0]
+    assert "Step 1 - command: kubectl get pods" in mitigation_prompt
+    assert "Reply with the JSON object for step 2." in mitigation_prompt
+    assert read_results(harness["logs"])["baseline"]["stages"]["mitigation"]["commands_used"] == 0
+
+
+def test_attempt_starting_at_mitigation_runs_only_the_mitigation_loop(monkeypatch, harness):
     harness["stages"] = ["mitigation", "done"]
-    backend = FakeBackend([])
+    backend = FakeBackend([submit("")])
     assert run_main(monkeypatch, backend, max_commands="3") == 0
-    assert backend.calls == []
+    assert len(backend.calls) == 1
     assert harness["submissions"] == [("", "mitigation")]
+    assert "diagnosis" not in read_results(harness["logs"])["baseline"]["stages"]
 
 
 def test_external_submission_is_detected_and_not_resubmitted(monkeypatch, harness):
@@ -223,6 +284,202 @@ def test_external_submission_is_detected_and_not_resubmitted(monkeypatch, harnes
     assert run_main(monkeypatch, backend, max_commands="3") == 3
     assert harness["submissions"] == []
     assert read_results(harness["logs"])["baseline"]["termination_reason"] == "external_submission"
+
+
+def test_session_mode_keeps_one_growing_conversation(monkeypatch, harness):
+    backend = FakeSessionBackend([command("kubectl get pods"), command("kubectl get svc"), submit(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_commands="10", context="session") == 0
+    assert harness["submissions"] == [(DIAGNOSIS, "diagnosis")]
+    first, second, third = backend.sessions
+    assert [m["role"] for m in first] == ["system", "user"]
+    assert first[1]["content"] == protocol.build_step_prompt(
+        protocol.build_task_text(APP), mode="full", max_commands=10, used=0, steps=[], submit_only=False
+    )
+    assert [m["role"] for m in second] == ["system", "user", "assistant", "user"]
+    assert second[:2] == first  # the prefix never changes, so the provider can cache it
+    assert second[2] == {
+        "role": "assistant",
+        "content": json.dumps(command("kubectl get pods")),
+        "reasoning_content": "thinking 1",
+    }
+    assert "[RESULT]\nStep 1 - command: kubectl get pods" in second[3]["content"]
+    assert "pod-a Running" in second[3]["content"]
+    assert second[3]["content"].rstrip().endswith("Reply with the JSON object for step 2.")
+    assert "[TRANSCRIPT]" not in second[3]["content"]
+    assert len(third) == 6 and third[:4] == second
+    assert "Step 2 - command: kubectl get svc" in third[5]["content"]
+    results = read_results(harness["logs"])
+    assert results["baseline"]["context"] == "session" and results["baseline"]["session_reasoning"] is True
+    assert results["baseline"]["commands_used"] == 2 and results["baseline"]["termination_reason"] == "submitted"
+    calls = [r for r in read_transcript(harness["logs"]) if r["type"] == "model_call"]
+    assert [c["context"] for c in calls] == ["session"] * 3 and [c["messages"] for c in calls] == [3, 5, 7]
+    assert (harness["logs"] / "steps" / "step_03" / "messages.json").exists()
+
+
+def test_session_mode_submit_only_goes_into_the_turn_not_the_system_message(monkeypatch, harness):
+    backend = FakeSessionBackend([command("kubectl get pods"), submit(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_commands="1", context="session") == 0
+    first, second = backend.sessions
+    assert second[0] == first[0]
+    assert '"enum": ["command", "submit"]' in second[0]["content"]
+    assert 'Only "submit" is accepted at this step.' in second[3]["content"]
+    assert "Used: 1. Remaining: 0." in second[3]["content"]
+    assert read_results(harness["logs"])["baseline"]["termination_reason"] == "budget_exhausted_forced_submit"
+
+
+def test_session_mode_continues_into_mitigation(monkeypatch, harness):
+    harness["stages"] = ["diagnosis", "mitigation", "done"]
+    backend = FakeSessionBackend(
+        [
+            command("kubectl get pods"),
+            submit(DIAGNOSIS),
+            command("kubectl patch deploy/frontend -p '{}'"),
+            {"action": "submit", "note": "fixed", "command": None, "diagnosis": None},
+        ]
+    )
+    assert run_main(monkeypatch, backend, max_commands="10", context="session") == 0
+    assert harness["submissions"] == [(DIAGNOSIS, "diagnosis"), ("", "mitigation")]
+    diagnosis_end, mitigation_start, mitigation_end = backend.sessions[1], backend.sessions[2], backend.sessions[3]
+    assert mitigation_start[: len(diagnosis_end)] == diagnosis_end
+    assert mitigation_start[-2]["content"] == json.dumps(submit(DIAGNOSIS))
+    turn = mitigation_start[-1]["content"]
+    assert "[STAGE CHANGE]" in turn and "Current stage: mitigation" in turn and "[MITIGATION STAGE]" in turn
+    assert "[RESULT]" not in turn and turn.rstrip().endswith("Reply with the JSON object for step 2.")
+    assert "[STAGE CHANGE]" not in mitigation_end[-1]["content"]
+    assert "Step 2 - command: kubectl patch deploy/frontend" in mitigation_end[-1]["content"]
+    results = read_results(harness["logs"])
+    assert results["baseline"]["stages"]["mitigation"]["commands_used"] == 1
+    assert results["baseline"]["stages"]["mitigation"]["termination_reason"] == "submitted"
+
+
+def test_session_mode_reasks_with_a_notice_after_an_unusable_reply(monkeypatch, harness):
+    bad = StepResult(parsed=None, raw_text="not json at all", error="reply is not a JSON object", reasoning="hmm")
+    backend = FakeSessionBackend([bad, submit(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_commands="3", context="session") == 0
+    second = backend.sessions[1]
+    assert second[2] == {"role": "assistant", "content": "not json at all", "reasoning_content": "hmm"}
+    assert "[NOTICE]\nYour previous reply could not be used: reply is not a JSON object." in second[3]["content"]
+    assert second[3]["content"].rstrip().endswith("Reply with the JSON object for step 1.")
+
+
+def test_session_mode_resends_after_a_transport_failure(monkeypatch, harness):
+    failed = StepResult(parsed=None, raw_text="", error="model call failed: Timeout")
+    backend = FakeSessionBackend([failed, submit(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_commands="3", context="session") == 0
+    assert backend.sessions[1] == backend.sessions[0]
+
+
+def test_session_mode_can_leave_reasoning_out(monkeypatch, harness):
+    monkeypatch.setattr(driver, "SESSION_REASONING", False)
+    backend = FakeSessionBackend([command("kubectl get pods"), submit(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_commands="3", context="session") == 0
+    assert backend.sessions[1][2] == {"role": "assistant", "content": json.dumps(command("kubectl get pods"))}
+
+
+def test_session_mode_needs_a_message_backend(monkeypatch, harness):
+    assert run_main(monkeypatch, FakeBackend([submit(DIAGNOSIS)]), context="session") == 1
+    assert harness["submissions"] == []
+
+
+def test_api_backend_gives_up_at_the_hard_deadline(tmp_path, monkeypatch):
+    import time as time_module
+
+    import litellm
+
+    from clients.baseline import backends
+    from clients.baseline.backends import ApiBackend
+
+    env = {"AGENT_API_BASE": "https://example.invalid/v1", "AGENT_API_KEY": "k", "BASELINE_API_HARD_DEADLINE_S": "0.2"}
+    backend = ApiBackend("openai/glm-5.3", None, env={**env, "BASELINE_API_STREAM": "0"})
+    assert backend.hard_deadline_s == 0.2
+
+    def hangs(**kwargs):
+        time_module.sleep(2)
+        return None
+
+    monkeypatch.setattr(litellm, "completion", hangs)
+    monkeypatch.setattr(backends, "API_RETRY_WAIT_S", 0)
+    started = time_module.monotonic()
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    assert time_module.monotonic() - started < 1.5
+    assert result.parsed is None and "hard deadline" in (result.error or "")
+    assert "hard deadline" in (tmp_path / "s1" / "stderr.log").read_text()
+
+
+def test_api_backend_streams_by_default_and_assembles_the_reply(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import litellm
+
+    from clients.baseline.backends import ApiBackend
+
+    backend = ApiBackend(
+        "openai/glm-5.3", "max", env={"AGENT_API_BASE": "https://example.invalid/v1", "AGENT_API_KEY": "k"}
+    )
+    assert backend.stream is True
+    seen = {}
+
+    def chunk(content=None, reasoning=None, finish=None, usage=None):
+        delta = SimpleNamespace(content=content, reasoning_content=reasoning)
+        choices = [SimpleNamespace(delta=delta, finish_reason=finish)] if content or reasoning or finish else []
+        return SimpleNamespace(choices=choices, usage=usage)
+
+    def fake_stream(**kwargs):
+        seen.update(kwargs)
+        usage = SimpleNamespace(
+            prompt_tokens=900,
+            completion_tokens=120,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=704),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=80),
+        )
+        yield chunk(reasoning="think ")
+        yield chunk(reasoning="more")
+        yield chunk(content='{"action": "submit", "note": "n", ')
+        yield chunk(content='"command": null, "diagnosis": "d"}', finish="stop")
+        yield chunk(usage=usage)
+
+    monkeypatch.setattr(litellm, "completion", fake_stream)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    assert seen["stream"] is True and seen["stream_options"] == {"include_usage": True}
+    assert result.error is None and result.parsed["diagnosis"] == "d"
+    assert result.reasoning == "think more" and (tmp_path / "s1" / "reasoning.txt").read_text() == "think more"
+    assert result.usage["input_tokens"] == 900 and result.usage["cached_input_tokens"] == 704
+    assert result.usage["reasoning_output_tokens"] == 80
+
+
+def test_api_backend_stops_a_stream_at_the_hard_deadline(tmp_path, monkeypatch):
+    import time as time_module
+    from types import SimpleNamespace
+
+    import litellm
+
+    from clients.baseline import backends
+    from clients.baseline.backends import ApiBackend
+
+    env = {"AGENT_API_BASE": "https://example.invalid/v1", "AGENT_API_KEY": "k", "BASELINE_API_HARD_DEADLINE_S": "0.1"}
+    backend = ApiBackend("openai/glm-5.3", None, env=env)
+    closed = []
+
+    class SlowStream:
+        def __iter__(self):
+            while True:
+                time_module.sleep(0.06)
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content="."), finish_reason=None)
+                    ],
+                    usage=None,
+                )
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(litellm, "completion", lambda **kwargs: SlowStream())
+    monkeypatch.setattr(backends, "API_RETRY_WAIT_S", 0)
+    started = time_module.monotonic()
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    assert time_module.monotonic() - started < 2
+    assert result.parsed is None and "hard deadline" in (result.error or "") and closed == [True, True]
 
 
 def test_parse_budget():
@@ -320,3 +577,79 @@ def test_protocol_task_text_matches_prompt_used_by_driver(monkeypatch, harness):
     run_main(monkeypatch, backend, max_commands="0")
     prompt = backend.calls[0][0]
     assert protocol.build_task_text(APP) in prompt
+
+
+def test_default_backend_name_prefers_explicit_then_api_endpoint(monkeypatch):
+    monkeypatch.setattr(driver, "BACKEND_NAME", "")
+    monkeypatch.delenv("AGENT_API_BASE", raising=False)
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    assert driver.default_backend_name() == "codex"
+    monkeypatch.setenv("AGENT_API_BASE", "https://api.z.ai/api/paas/v4")
+    assert driver.default_backend_name() == "api"
+    monkeypatch.setattr(driver, "BACKEND_NAME", "codex")
+    assert driver.default_backend_name() == "codex"
+
+
+def test_api_backend_request_and_response_mapping(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from clients.baseline.backends import ApiBackend
+
+    env = {
+        "AGENT_API_BASE": "https://api.z.ai/api/paas/v4",
+        "AGENT_API_KEY": "secret-key-123",
+        "BASELINE_EXTRA_BODY": '{"thinking": {"type": "enabled"}}',
+        "BASELINE_MAX_TOKENS": "4096",
+    }
+    backend = ApiBackend("openai/glm-5.3", "max", env={**env, "BASELINE_API_STREAM": "0"})
+    request = backend.request("prompt", {"type": "object"})
+    assert request["model"] == "openai/glm-5.3" and request["api_base"] == env["AGENT_API_BASE"]
+    assert request["extra_body"] == {"thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+    assert request["max_tokens"] == 4096 and request["temperature"] == 0
+    assert "secret-key-123" not in json.dumps(request["messages"])
+
+    calls = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        usage = SimpleNamespace(
+            prompt_tokens=1500,
+            completion_tokens=400,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=1000),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=350),
+        )
+        message = SimpleNamespace(
+            content='```json\n{"action": "submit", "note": "n", "command": null, "diagnosis": "d"}\n```',
+            reasoning_content="thinking...",
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=usage)
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    assert result.error is None and result.parsed["diagnosis"] == "d"
+    assert result.usage["input_tokens"] == 1500 and result.usage["cached_input_tokens"] == 1000
+    assert result.usage["reasoning_output_tokens"] == 350 and result.usage["total_tokens"] == 1900
+    assert (tmp_path / "s1" / "reasoning.txt").read_text() == "thinking..."
+    assert calls[0]["extra_body"]["reasoning_effort"] == "max"
+
+    messages = [
+        backend.system_message({"type": "object"}),
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "{}", "reasoning_content": "earlier thinking"},
+        {"role": "user", "content": "[RESULT] ..."},
+    ]
+    result = backend.complete_messages(messages, step_dir=tmp_path / "s2")
+    assert calls[-1]["messages"] == messages and calls[-1]["extra_body"] == request["extra_body"]
+    assert result.reasoning == "thinking..." and result.parsed["diagnosis"] == "d"
+    assert json.loads((tmp_path / "s2" / "messages.json").read_text()) == messages
+    assert (tmp_path / "s2" / "prompt.txt").read_text() == "[RESULT] ..."
+
+    def truncated(**kwargs):
+        message = SimpleNamespace(content='{"action": "submit", "note": "n"', reasoning_content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="length")], usage=None)
+
+    monkeypatch.setattr(litellm, "completion", truncated)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s2")
+    assert result.parsed is None and "max_tokens=4096" in result.error

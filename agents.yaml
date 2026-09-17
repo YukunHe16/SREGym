@@ -112,3 +112,34 @@ agents:
     kickoff_env: {BASELINE_MAX_COMMANDS: "10", BASELINE_SUBMISSION_MODE: no_mechanism, BASELINE_BACKEND: codex}
     install_script: install-codex.sh
     agent_version: "0.154.0"
+  # Provider-key arm: unlimited budget, normal submission, LiteLLM against AGENT_API_BASE/AGENT_API_KEY.
+  # Thinking switch and effort ride in BASELINE_EXTRA_BODY / --reasoning-effort (GLM-5.3: max, high, low).
+  - name: baseline_bU_full_api
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BASELINE_BACKEND: api
+      BASELINE_MAX_COMMANDS: unlimited
+      BASELINE_SUBMISSION_MODE: full
+      BASELINE_HARD_CAP: "80"
+      BASELINE_DEADLINE_S: "1500"
+      BASELINE_MAX_TOKENS: "32768"
+      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled"}}'
+    install_script: null
+    agent_version: null
+  # Same as baseline_bU_full_api but with one growing conversation: the model's replies and its
+  # reasoning_content go back each step (clear_thinking=false keeps them in Z.ai's context).
+  - name: baseline_bU_full_api_session
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BASELINE_BACKEND: api
+      BASELINE_CONTEXT: session
+      BASELINE_MAX_COMMANDS: unlimited
+      BASELINE_SUBMISSION_MODE: full
+      BASELINE_HARD_CAP: "80"
+      BASELINE_DEADLINE_S: "1500"
+      BASELINE_MAX_TOKENS: "32768"
+      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
+    install_script: null
+    agent_version: null

@@ -37,10 +37,22 @@ object matching the provided schema and nothing else.
 - action "command": one non-interactive bash command line. It runs in a container where kubectl is
   configured for the cluster. You receive its stdout, stderr (each truncated) and exit code.
   Do not call the submission endpoint yourself; use action "submit" instead.
-- action "submit": end the investigation and submit your diagnosis.
+- action "submit": {submit_meaning}
 - note: one short sentence on what you are doing or concluding (not the diagnosis itself).
 {budget_line}
-Current stage: diagnosis.{submit_only_line}"""
+Current stage: {stage}.{submit_only_line}"""
+
+SUBMIT_MEANING = {
+    "diagnosis": "end the investigation and submit your diagnosis.",
+    "mitigation": (
+        "declare that your fix has been applied; the driver then sends the empty mitigation submission that "
+        "triggers validation. Any diagnosis text in a mitigation submit is ignored."
+    ),
+}
+
+MITIGATION_STAGE_TEXT = """[MITIGATION STAGE]
+The diagnosis has been submitted. Now fix the problem with commands (kubectl and other tools are allowed to
+modify resources in the application namespace). When the application is healthy again, use action "submit"."""
 
 SUBMISSION_TEXT = {
     "full": """[SUBMISSION FORMAT]
@@ -58,6 +70,16 @@ The submission is assembled from these three fields exactly as given.""",
 FORMAT_VIOLATION_TEXT = """[NOTICE]
 Your previous submission did not follow the submission format: it contained {hits}.
 Resubmit with only the component, the affected components and the symptom, and no explanation."""
+
+# Session mode: the driver keeps one growing conversation instead of rebuilding the
+# prompt each step. The opening turn is the stateless step-1 prompt; every later
+# turn carries only what changed.
+STAGE_CHANGE_TEXT = """[STAGE CHANGE]
+The diagnosis stage is over. Current stage: {stage}. From now on, action "submit" means: {submit_meaning}"""
+
+UNUSABLE_REPLY_TEXT = """[NOTICE]
+Your previous reply could not be used: {error}.
+Reply with exactly one JSON object matching the schema and nothing else."""
 
 
 @dataclass
@@ -145,21 +167,29 @@ def build_step_prompt(
     submit_only: bool,
     output_chars: int = DEFAULT_OUTPUT_CHARS,
     violation: list[str] | None = None,
+    stage: str = "diagnosis",
 ) -> str:
     if mode not in SUBMISSION_MODES:
         raise ValueError(f"Unknown submission mode: {mode}")
+    if stage not in SUBMIT_MEANING:
+        raise ValueError(f"Unknown stage: {stage}")
     submit_only_line = ' Only "submit" is accepted at this step.' if submit_only else ""
     parts = [
         "[TASK]\n" + task_text.rstrip(),
-        PROTOCOL_TEXT.format(budget_line=budget_line(max_commands, used), submit_only_line=submit_only_line),
-        SUBMISSION_TEXT[mode],
+        PROTOCOL_TEXT.format(
+            submit_meaning=SUBMIT_MEANING[stage],
+            budget_line=budget_line(max_commands, used),
+            stage=stage,
+            submit_only_line=submit_only_line,
+        ),
+        MITIGATION_STAGE_TEXT if stage == "mitigation" else SUBMISSION_TEXT[mode],
     ]
     transcript = render_transcript(steps, output_chars=output_chars)
     if transcript:
         parts.append(transcript)
     if violation:
         parts.append(FORMAT_VIOLATION_TEXT.format(hits=", ".join(repr(hit) for hit in violation)))
-    parts.append(f"[NOW]\nReply with the JSON object for step {used + 1}.")
+    parts.append(f"[NOW]\nReply with the JSON object for step {len(steps) + 1}.")
     return "\n\n".join(parts) + "\n"
 
 
@@ -186,7 +216,7 @@ def step_schema(mode: str, submit_only: bool) -> dict:
     }
 
 
-def validate_step(obj: object, mode: str, submit_only: bool) -> str | None:
+def validate_step(obj: object, mode: str, submit_only: bool, stage: str = "diagnosis") -> str | None:
     """Return an error message when ``obj`` does not satisfy ``step_schema``; None when it does."""
     if not isinstance(obj, dict):
         return "reply is not a JSON object"
@@ -206,6 +236,8 @@ def validate_step(obj: object, mode: str, submit_only: bool) -> str | None:
         if not isinstance(obj.get("command"), str) or not obj["command"].strip():
             return "command must be a non-empty string when action is command"
         return None
+    if stage == "mitigation":
+        return None  # the mitigation submission is always the empty string
     if mode == "full":
         if not isinstance(obj.get("diagnosis"), str) or not obj["diagnosis"].strip():
             return "diagnosis must be a non-empty string when action is submit"
@@ -232,8 +264,10 @@ def mechanism_guard_hits(parsed: dict, mode: str) -> list[str]:
     return sorted(set(hit.lower() for hit in hits))
 
 
-def compose_submission(parsed: dict, mode: str) -> str:
+def compose_submission(parsed: dict, mode: str, stage: str = "diagnosis") -> str:
     """The text that goes to the conductor."""
+    if stage == "mitigation":
+        return ""
     if mode == "full":
         return parsed["diagnosis"].strip()
     affected = [item.strip() for item in (parsed.get("affected_components") or []) if item.strip()]
@@ -243,3 +277,43 @@ def compose_submission(parsed: dict, mode: str) -> str:
         f"Affected components: {affected_text}. "
         f"Observed symptom: {parsed['symptom'].strip()}."
     )
+
+
+def stage_change_text(stage: str) -> str:
+    """The turn that moves a session from diagnosis into ``stage``."""
+    if stage not in SUBMIT_MEANING:
+        raise ValueError(f"Unknown stage: {stage}")
+    text = STAGE_CHANGE_TEXT.format(stage=stage, submit_meaning=SUBMIT_MEANING[stage])
+    if stage == "mitigation":
+        text += "\n\n" + MITIGATION_STAGE_TEXT
+    return text
+
+
+def build_session_turn(
+    step: StepRecord | None,
+    *,
+    max_commands: int | None,
+    used: int,
+    next_step: int,
+    submit_only: bool,
+    output_chars: int = DEFAULT_OUTPUT_CHARS,
+    violation: list[str] | None = None,
+    stage_change: str | None = None,
+    unusable_reply: str | None = None,
+) -> str:
+    """One follow-up user turn: the last command's result, notices, the budget, and the step to answer."""
+    parts: list[str] = []
+    if step is not None:
+        parts.append("[RESULT]\n" + render_step(step, output_chars))
+    if stage_change:
+        parts.append(stage_change)
+    if unusable_reply:
+        parts.append(UNUSABLE_REPLY_TEXT.format(error=unusable_reply))
+    if violation:
+        parts.append(FORMAT_VIOLATION_TEXT.format(hits=", ".join(repr(hit) for hit in violation)))
+    status = budget_line(max_commands, used)
+    if submit_only:
+        status += ' Only "submit" is accepted at this step.'
+    parts.append("[STATUS]\n" + status)
+    parts.append(f"[NOW]\nReply with the JSON object for step {next_step}.")
+    return "\n\n".join(parts) + "\n"

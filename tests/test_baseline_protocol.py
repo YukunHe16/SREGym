@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from clients.baseline import protocol
 from clients.codex.driver import build_instruction
 
@@ -106,3 +108,33 @@ def test_transcript_shrinks_old_steps_but_not_recent_ones():
     assert "truncated" not in text.split("Step 7 -")[1]
     refused = protocol.StepRecord(8, "curl /submit", 126, "", "no", refused="external_submit")
     assert "refused: external_submit" in protocol.render_step(refused, 1000)
+
+
+def test_mitigation_stage_prompt_and_submission():
+    prompt = protocol.build_step_prompt(
+        "task", mode="full", max_commands=None, used=0, steps=[], submit_only=False, stage="mitigation"
+    )
+    assert "[MITIGATION STAGE]" in prompt and "Current stage: mitigation" in prompt
+    assert "[SUBMISSION FORMAT]" not in prompt
+    done = {"action": "submit", "note": "fixed", "command": None, "diagnosis": None}
+    assert protocol.validate_step(done, "full", False, "mitigation") is None
+    assert protocol.validate_step(done, "full", False, "diagnosis") is not None
+    assert protocol.compose_submission(done, "full", "mitigation") == ""
+
+
+def test_session_turn_layout():
+    step = protocol.StepRecord(1, "kubectl get pods", 0, "pod-a", "", 0.1)
+    turn = protocol.build_session_turn(step, max_commands=3, used=1, next_step=2, submit_only=False)
+    assert turn.startswith("[RESULT]\nStep 1 - command: kubectl get pods\n")
+    assert "[STATUS]\nCommand budget: you may run at most 3 commands in this run. Used: 1. Remaining: 2." in turn
+    assert turn.rstrip().endswith("[NOW]\nReply with the JSON object for step 2.")
+    forced = protocol.build_session_turn(
+        None, max_commands=None, used=4, next_step=5, submit_only=True, violation=["because"], unusable_reply="bad"
+    )
+    assert "[RESULT]" not in forced and 'Only "submit" is accepted at this step.' in forced
+    assert "[NOTICE]\nYour previous reply could not be used: bad." in forced and "'because'" in forced
+    change = protocol.stage_change_text("mitigation")
+    assert change.startswith("[STAGE CHANGE]\nThe diagnosis stage is over. Current stage: mitigation.")
+    assert "[MITIGATION STAGE]" in change
+    with pytest.raises(ValueError):
+        protocol.stage_change_text("nope")
