@@ -238,6 +238,7 @@ class StageOutcome:
     wall_seconds: float = 0.0
     tool_counts: dict = field(default_factory=dict)
     plain_text_submission: bool = False
+    records: int = 0  # command records written by this stage (the next stage numbers its records after them)
 
     def summary(self) -> dict:
         return {
@@ -521,6 +522,7 @@ def run_stage_mini(
     guard_warned = False
     guard_tripped = False
     budget_notice_sent = False
+    records = 0
 
     def outcome(text: str | None, reason: str) -> StageOutcome:
         return StageOutcome(
@@ -533,6 +535,7 @@ def run_stage_mini(
             guard_tripped,
             round(time.monotonic() - started, 3),
             {"bash": used},
+            records=records,
         )
 
     def rejected(reason: str) -> str:
@@ -586,7 +589,8 @@ def run_stage_mini(
             session.add_user(mini.format_error_text(n_actions))
             continue
         format_errors = 0
-        index = index_offset + used + 1
+        records += 1
+        index = index_offset + records
 
         if budget_exhausted and mini.MARKER not in action:
             session.add_user(
@@ -871,7 +875,7 @@ def main():
         outcome = run("diagnosis")
         usage_records.extend(outcome.usage_records)
         calls = outcome.model_calls
-        tool_calls = outcome.tool_calls_used
+        tool_calls = outcome.records if PROTOCOL == "mini" else outcome.tool_calls_used
         baseline_meta["stages"]["diagnosis"] = outcome.summary()
         # Top-level copies keep the diagnosis-only fields where earlier runs put them.
         baseline_meta.update(
