@@ -153,8 +153,10 @@ def test_zero_budget_makes_one_submit_only_call(monkeypatch, harness):
     assert results["baseline"]["termination_reason"] == "budget_exhausted_forced_submit"
     assert results["usage_metrics"]["input_tokens"] == 100
     assert results["usage_metrics"]["token_metrics_version"] == 2
-    kinds = [record["type"] for record in read_transcript(harness["logs"])]
+    records = read_transcript(harness["logs"])
+    kinds = [record["type"] for record in records]
     assert kinds[:2] == ["meta", "model_call"] and "submit" in kinds and kinds[-1] == "end"
+    assert records[1]["repaired"] is False
 
 
 def test_budget_counts_refused_commands_and_forces_submit(monkeypatch, harness):
@@ -525,6 +527,44 @@ def test_api_backend_waits_out_rate_limits_then_gives_up(tmp_path, monkeypatch):
     monkeypatch.setattr(litellm, "completion", limited_then_ok)
     result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s2")
     assert result.error is None and result.parsed["diagnosis"] == "d" and len(calls) == 3
+
+
+def test_parse_answer_repairs_stray_backslashes_only():
+    from clients.baseline.backends import _parse_answer, repair_json_text
+
+    raw = '{"action": "command", "note": "n", "command": "grep -E \\d+ | sed \\"s/x/y/\\"", "diagnosis": null}'
+    parsed, error, repaired = _parse_answer(raw)
+    assert error is None and repaired is True
+    assert parsed["command"] == 'grep -E \\d+ | sed "s/x/y/"'
+    assert _parse_answer('{"a": "x\\\\y\\n"}') == ({"a": "x\\y\n"}, None, False)
+    assert repair_json_text('"\\d \\\\ \\n \\""') == '"\\\\d \\\\ \\n \\""'
+    parsed, error, repaired = _parse_answer('{"a": "unterminated}')
+    assert parsed is None and "not valid JSON" in error and repaired is False
+
+
+def test_api_backend_reports_repaired_replies(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import litellm
+
+    from clients.baseline.backends import ApiBackend
+
+    backend = ApiBackend(
+        "openai/glm-5.3",
+        None,
+        env={"AGENT_API_BASE": "https://example.invalid/v1", "AGENT_API_KEY": "k", "BASELINE_API_STREAM": "0"},
+    )
+
+    def stray(**kwargs):
+        message = SimpleNamespace(
+            content='{"action": "command", "note": "n", "command": "grep \\d", "diagnosis": null}',
+            reasoning_content=None,
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr(litellm, "completion", stray)
+    result = backend.complete_json("prompt", {"type": "object"}, step_dir=tmp_path / "s1")
+    assert result.error is None and result.repaired is True and result.parsed["command"] == "grep \\d"
 
 
 def test_parse_budget():

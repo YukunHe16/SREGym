@@ -53,6 +53,7 @@ class StepResult:
     latency_s: float = 0.0
     error: str | None = None
     reasoning: str | None = None  # the provider's visible reasoning, for session mode to pass back
+    repaired: bool = False  # the reply parsed only after escaping stray backslashes
 
 
 class ModelBackend(Protocol):
@@ -91,16 +92,32 @@ def read_events(path: Path) -> list[dict]:
     return events
 
 
-def _parse_answer(raw: str) -> tuple[dict | None, str | None]:
+# Valid JSON escapes are consumed as pairs so they stay intact; any other backslash is a stray one.
+# Shell commands are full of those (grep patterns, printf formats) and models keep emitting them unescaped.
+_ESCAPE_OR_STRAY = re.compile(r'\\["\\/bfnrtu]|\\')
+
+
+def repair_json_text(raw: str) -> str:
+    """Double stray backslashes so that the common malformed reply parses; nothing else is touched."""
+    return _ESCAPE_OR_STRAY.sub(lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
+
+
+def _parse_answer(raw: str) -> tuple[dict | None, str | None, bool]:
+    """(parsed object, error, repaired): strict parse first, then the backslash repair."""
     if not raw.strip():
-        return None, "empty model reply"
+        return None, "empty model reply", False
+    repaired = False
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        return None, f"reply is not valid JSON: {exc}"
+        try:
+            parsed = json.loads(repair_json_text(raw))
+            repaired = True
+        except json.JSONDecodeError:
+            return None, f"reply is not valid JSON: {exc}", False
     if not isinstance(parsed, dict):
-        return None, "reply is not a JSON object"
-    return parsed, None
+        return None, "reply is not a JSON object", repaired
+    return parsed, None, repaired
 
 
 class CodexExecBackend:
@@ -207,8 +224,10 @@ class CodexExecBackend:
             stderr_tail = (step_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")[-500:]
             error = f"codex exec exited {returncode}: {stderr_tail.strip()}"
         raw = answer_path.read_text(encoding="utf-8", errors="replace") if answer_path.exists() else ""
-        parsed, parse_error = _parse_answer(raw) if error is None else (None, None)
-        return StepResult(parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=error or parse_error)
+        parsed, parse_error, repaired = _parse_answer(raw) if error is None else (None, None, False)
+        return StepResult(
+            parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=error or parse_error, repaired=repaired
+        )
 
 
 def content_text(content: object) -> str:
@@ -455,9 +474,15 @@ class ApiBackend:
         if reply.reasoning:
             (step_dir / "reasoning.txt").write_text(reply.reasoning, encoding="utf-8")
         usage = parse_api_usage(reply.usage)
-        parsed, parse_error = _parse_answer(extract_json_object(raw))
+        parsed, parse_error, repaired = _parse_answer(extract_json_object(raw))
         if parse_error and reply.finish_reason == "length":
             parse_error = f"{parse_error} (output truncated at max_tokens={self.max_tokens})"
         return StepResult(
-            parsed=parsed, raw_text=raw, usage=usage, latency_s=latency, error=parse_error, reasoning=reply.reasoning
+            parsed=parsed,
+            raw_text=raw,
+            usage=usage,
+            latency_s=latency,
+            error=parse_error,
+            reasoning=reply.reasoning,
+            repaired=repaired,
         )

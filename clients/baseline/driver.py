@@ -461,6 +461,7 @@ def run_stage(
                 "usage": result.usage,
                 "raw": result.raw_text[:20000],
                 "parsed": result.parsed,
+                "repaired": result.repaired,
                 "error": error,
             }
         )

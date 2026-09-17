@@ -79,7 +79,9 @@ The diagnosis stage is over. Current stage: {stage}. From now on, action "submit
 
 UNUSABLE_REPLY_TEXT = """[NOTICE]
 Your previous reply could not be used: {error}.
-Reply with exactly one JSON object matching the schema and nothing else."""
+Reply with exactly one JSON object matching the schema and nothing else. Inside JSON strings every backslash
+must be written as \\\\ and every double quote as \\"; prefer single quotes inside shell commands so that little
+needs escaping."""
 
 
 @dataclass
