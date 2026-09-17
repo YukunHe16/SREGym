@@ -1,10 +1,11 @@
 """Tools the baseline agent can call: a few local ones and whatever SREGym's MCP server offers.
 
 Local tools run inside the agent container (``bash`` with the cluster's kubectl configured,
-``read_file``, ``write_file``). MCP tools are discovered at start-up from the sub-servers of
-``MCP_SERVER_URL`` (kubectl, prometheus, jaeger, loki), the same server the Stratus agent uses,
-and are exposed to the model under their own names. Submission is not a tool from here: the
-driver owns it so that budgets and submission modes stay enforceable.
+``read_file``, ``write_file``); they are the default, matching what the CLI agents have. MCP
+tools are opt-in (``BASELINE_TOOLS`` entries ``mcp:kubectl``, ``mcp:prometheus``, ``mcp:jaeger``,
+``mcp:loki``): they are discovered at start-up from the sub-servers of ``MCP_SERVER_URL``, the
+same server the Stratus agent uses, and exposed to the model under their own names. Submission is
+not a tool from here: the driver owns it so that budgets and submission modes stay enforceable.
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_TOOLS = "bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki"
+DEFAULT_TOOLS = "bash,read_file,write_file"  # the CLI agents' condition; add mcp:<server> entries to opt in
+ALL_TOOLS = "bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki"
 MCP_SERVERS = ("kubectl", "prometheus", "jaeger", "loki")
 MCP_CONNECT_TIMEOUT_S = 30
 MCP_CALL_TIMEOUT_S = 120

@@ -419,7 +419,8 @@ def test_local_tools_read_and_write(tmp_path):
 
 
 def test_tool_selection_parsing():
-    assert tools.parse_tool_selection(None) == (
+    assert tools.parse_tool_selection(None) == (["bash", "read_file", "write_file"], [])
+    assert tools.parse_tool_selection(tools.ALL_TOOLS) == (
         ["bash", "read_file", "write_file"],
         ["kubectl", "prometheus", "jaeger", "loki"],
     )

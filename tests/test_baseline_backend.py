@@ -41,7 +41,10 @@ def test_build_request_shape_and_secret_hygiene():
     backend = ApiBackend("openai/glm-5.3", "high", env={**ENV, "BASELINE_MAX_TOKENS": "4096"})
     request = backend.build_request([{"role": "user", "content": "hi"}], [BASH])
     assert request["model"] == "openai/glm-5.3" and request["api_base"] == ENV["AGENT_API_BASE"]
-    assert request["tools"] == [BASH.as_openai()] and request["max_tokens"] == 4096 and request["temperature"] == 0
+    assert request["tools"] == [BASH.as_openai()] and request["max_tokens"] == 4096
+    assert "temperature" not in request  # provider default, as with the CLI agents
+    pinned = ApiBackend("openai/glm-5.3", None, env={**ENV, "BASELINE_TEMPERATURE": "0"})
+    assert pinned.build_request([{"role": "user", "content": "hi"}], [])["temperature"] == 0.0
     assert request["extra_body"] == {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
     assert "secret-key-123" not in json.dumps(request["messages"])
     assert "tools" not in backend.build_request([], [])

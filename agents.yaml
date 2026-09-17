@@ -68,29 +68,29 @@ agents:
     agent_version: null
     container_isolation: false
   # Baseline agent arms (provider-key models through LiteLLM; one growing conversation with tools).
-  # BASELINE_MAX_COMMANDS is the tool-call budget per stage (submit excluded); BASELINE_TOOLS picks
-  # the local tools and MCP sub-servers offered to the model; BASELINE_SUBMISSION_MODE=no_mechanism
-  # makes the submit tool take three fields (component, affected components, symptom) and no "why".
+  # BASELINE_MAX_COMMANDS is the tool-call budget per stage (submit excluded). Tools default to the
+  # CLI agents' condition (bash, read_file, write_file); BASELINE_TOOLS adds MCP sub-servers.
+  # BASELINE_SUBMISSION_MODE=no_mechanism makes the submit tool take three fields and no "why".
+  # No temperature is sent (provider default), as with the CLI agents; BASELINE_TEMPERATURE pins one.
   - name: baseline
     kickoff_command: python -m clients.baseline.driver
     kickoff_workdir: .
     kickoff_env:
       BASELINE_MAX_COMMANDS: unlimited
       BASELINE_SUBMISSION_MODE: full
-      BASELINE_TOOLS: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
       BASELINE_HARD_CAP: "80"
       BASELINE_DEADLINE_S: "1500"
       BASELINE_MAX_TOKENS: "65536"
       BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
     install_script: null
     agent_version: null
-  - name: baseline_bash_only
+  - name: baseline_mcp
     kickoff_command: python -m clients.baseline.driver
     kickoff_workdir: .
     kickoff_env:
       BASELINE_MAX_COMMANDS: unlimited
       BASELINE_SUBMISSION_MODE: full
-      BASELINE_TOOLS: bash,read_file,write_file
+      BASELINE_TOOLS: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
       BASELINE_HARD_CAP: "80"
       BASELINE_DEADLINE_S: "1500"
       BASELINE_MAX_TOKENS: "65536"

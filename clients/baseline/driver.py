@@ -2,8 +2,8 @@
 Baseline agent driver for SREGym: a tool-calling loop around one model.
 
 The examinee gets the same task instruction as the CLI agents, a small set of tools
-(``bash``, ``read_file``, ``write_file`` in its container, plus whatever SREGym's MCP
-server offers: kubectl, prometheus, jaeger, loki) and a driver-owned ``submit`` tool.
+(``bash``, ``read_file``, ``write_file`` in its container; optionally SREGym's MCP tools
+for kubectl, prometheus, jaeger and loki) and a driver-owned ``submit`` tool.
 Each step the model replies with tool calls; the driver runs them in order, feeds the
 results back and stops when the model submits. Like the Stratus agent, a stage that
 hits its tool-call budget, the hard cap or the deadline gets one last turn with only
@@ -13,7 +13,7 @@ Knobs (environment):
 
     BASELINE_MAX_COMMANDS      tool calls per stage: 0, a positive integer, or "unlimited"
     BASELINE_SUBMISSION_MODE   "full" or "no_mechanism" (three fields, no explanation of why)
-    BASELINE_TOOLS             comma list: bash,read_file,write_file,mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
+    BASELINE_TOOLS             comma list, default bash,read_file,write_file; add mcp:kubectl,mcp:prometheus,mcp:jaeger,mcp:loki
     BASELINE_HARD_CAP / BASELINE_DEADLINE_S / BASELINE_COMMAND_TIMEOUT / BASELINE_OUTPUT_CHARS
 
 The conversation is one growing message list (the model's replies and, when the provider

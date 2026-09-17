@@ -153,6 +153,9 @@ class ApiBackend:
         # without sending bytes never trips the HTTP read timeout.
         self.hard_deadline_s = float(source.get("BASELINE_API_HARD_DEADLINE_S", str(self.timeout_s + 60)))
         self.stream = source.get("BASELINE_API_STREAM", "1") != "0"
+        # Sampling is left at the provider's default, as the CLI agents do; set BASELINE_TEMPERATURE to pin it.
+        raw_temperature = source.get("BASELINE_TEMPERATURE")
+        self.temperature = float(raw_temperature) if raw_temperature not in (None, "") else None
 
     def version(self) -> str:
         return f"litellm {package_version('litellm')}"
@@ -165,10 +168,11 @@ class ApiBackend:
         request: dict = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0,
             "max_tokens": self.max_tokens,
             "timeout": self.timeout_s,
         }
+        if self.temperature is not None:
+            request["temperature"] = self.temperature
         if tools:
             request["tools"] = [spec.as_openai() for spec in tools]
         if self.api_base:
