@@ -16,6 +16,13 @@ import re
 from clients.baseline.protocol import MECHANISM_GUARD, SUBMISSION_MODES, build_task_text
 
 MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+SUBMIT_MODES = ("auto", "curl", "marker")
+# curl: the model submits exactly as the task instruction says (POST /submit itself) and the driver only
+# watches the conductor's stage; this is the CLI agents' condition and the default for unrestricted arms.
+# marker: the driver owns the submission through the marker command; needed by budget and no_mechanism arms.
+CURL_INSTANCE_NOTE = """
+
+Note: every command is executed in a new subshell; directory or environment variable changes do not persist."""
 ACTION_REGEX = re.compile(r"```bash\s*\n(.*?)\n```", re.DOTALL)
 OUTPUT_LIMIT = 10_000  # mini-swe-agent's observation limit: head and tail of 5,000 characters each
 MAX_CONSECUTIVE_FORMAT_ERRORS = 3
@@ -141,10 +148,24 @@ def budget_rule(max_commands: int | None) -> str:
     return BUDGET_RULE.format(max_commands=max_commands)
 
 
-def instance_text(app_info: dict, *, mode: str, max_commands: int | None) -> str:
-    """The first user turn: SREGym's task instruction (verbatim), then mini-swe-agent's rules."""
+def resolve_submit_mode(value: str, *, mode: str, max_commands: int | None) -> str:
+    """``auto`` is curl for an unrestricted full-text arm and marker otherwise; curl cannot serve the other arms."""
+    if value not in SUBMIT_MODES:
+        raise ValueError(f"BASELINE_SUBMIT must be one of {SUBMIT_MODES}")
+    needs_driver = mode != "full" or max_commands is not None
+    if value == "auto":
+        return "marker" if needs_driver else "curl"
+    if value == "curl" and needs_driver:
+        raise ValueError("BASELINE_SUBMIT=curl needs BASELINE_SUBMISSION_MODE=full and an unlimited budget")
+    return value
+
+
+def instance_text(app_info: dict, *, mode: str, max_commands: int | None, submit_mode: str = "marker") -> str:
+    """The first user turn: SREGym's task instruction (verbatim); marker mode appends mini-swe-agent's rules."""
     if mode not in SUBMISSION_MODES:
         raise ValueError(f"Unknown submission mode: {mode}")
+    if submit_mode == "curl":
+        return build_task_text(app_info).rstrip() + CURL_INSTANCE_NOTE
     return INSTANCE_TEMPLATE.format(
         task=build_task_text(app_info).rstrip(),
         budget_rule=budget_rule(max_commands),

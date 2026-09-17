@@ -80,6 +80,9 @@ def harness(monkeypatch, tmp_path):
         if MARKER in cmd:  # emulate the heredoc / echo: print what the command would print
             body = cmd.split("\n", 1)[1].rsplit("\nEOF", 1)[0] if "<<'EOF'" in cmd else MARKER
             return tools.CommandResult(body + "\n", "", 0, 0.01)
+        if "/submit" in cmd and state.get("conductor_accepts_curl"):  # the conductor advances the stage
+            state["current"] = "mitigation" if state["current"] == "diagnosis" else "done"
+            return tools.CommandResult('{"status": "200", "message": "Submission received"}\n', "", 0, 0.05)
         if cmd.startswith("sleep"):
             return tools.CommandResult("", "", 124, 60.0, timed_out=True)
         return tools.CommandResult("pod-a Running\n", "warn\n", 0, 0.01)
@@ -89,7 +92,8 @@ def harness(monkeypatch, tmp_path):
     return state
 
 
-def run_main(monkeypatch, backend, *, max_calls="unlimited", mode="full", hard_cap=80):
+def run_main(monkeypatch, backend, *, max_calls="unlimited", mode="full", hard_cap=80, submit="marker"):
+    monkeypatch.setattr(driver, "SUBMIT_RAW", submit)
     monkeypatch.setattr(driver, "MAX_COMMANDS_RAW", max_calls)
     monkeypatch.setattr(driver, "SUBMISSION_MODE", mode)
     monkeypatch.setattr(driver, "HARD_CAP", hard_cap)
@@ -334,3 +338,72 @@ def test_no_real_problem_id_reaches_the_logs(monkeypatch, harness):
     backend = FakeBackend([block("kubectl get pods"), submit_block(DIAGNOSIS)])
     assert run_main(monkeypatch, backend) == 0
     assert _find_token_hit(harness["logs"], REAL_PROBLEM_ID) is None
+
+
+# --- curl mode: the CLI agents' condition ---------------------------------------------------
+
+
+def test_resolve_submit_mode():
+    assert mini.resolve_submit_mode("auto", mode="full", max_commands=None) == "curl"
+    assert mini.resolve_submit_mode("auto", mode="full", max_commands=3) == "marker"
+    assert mini.resolve_submit_mode("auto", mode="no_mechanism", max_commands=None) == "marker"
+    assert mini.resolve_submit_mode("marker", mode="full", max_commands=None) == "marker"
+    with pytest.raises(ValueError):
+        mini.resolve_submit_mode("curl", mode="full", max_commands=3)
+    with pytest.raises(ValueError):
+        mini.resolve_submit_mode("nope", mode="full", max_commands=None)
+
+
+def test_curl_mode_instance_is_the_task_plus_one_note():
+    text = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
+    assert text == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE
+    assert "Important Rules" not in text and MARKER not in text
+
+
+def test_curl_mode_lets_the_model_submit_itself_through_both_stages(monkeypatch, harness):
+    harness["stages"] = ["diagnosis", "mitigation", "done"]
+    harness["conductor_accepts_curl"] = True
+    curl_diag = block(
+        "curl -s -X POST http://localhost:8000/submit -H 'Content-Type: application/json' -d '{\"solution\": \"the selector is wrong\"}'"
+    )
+    curl_fix = block(
+        "curl -s -X POST http://localhost:8000/submit -H 'Content-Type: application/json' -d '{\"solution\": \"\"}'"
+    )
+    backend = FakeBackend([block("kubectl get pods"), curl_diag, block("kubectl patch svc frontend -p '{}'"), curl_fix])
+    assert run_main(monkeypatch, backend, submit="auto") == 0
+    assert harness["submissions"] == []  # the driver posts nothing; the model did it
+    assert len(harness["commands"]) == 4
+    first = backend.calls[0]
+    assert first[1]["content"] == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE
+    # no stage-change message: the conversation just continues with the observation of the curl command
+    third = backend.calls[2]
+    assert third[-1]["role"] == "user" and third[-1]["content"].startswith("<returncode>0</returncode>")
+    assert "Submission received" in third[-1]["content"] and "Current stage: mitigation" not in third[-1]["content"]
+    results = read_results(harness["logs"])
+    assert results["baseline"]["submit_mode"] == "curl" and results["baseline"]["submitted_stages"] == [
+        "diagnosis",
+        "mitigation",
+    ]
+    assert results["baseline"]["stages"]["diagnosis"]["termination_reason"] == "submitted_by_command"
+    assert results["baseline"]["stages"]["mitigation"]["termination_reason"] == "submitted_by_command"
+    assert results["baseline"]["stages"]["diagnosis"]["commands_used"] == 2  # the curl counts as a command it ran
+    submits = [r for r in read_transcript(harness["logs"]) if r["type"] == "submit"]
+    assert [r["by"] for r in submits] == ["command", "command"]
+
+
+def test_curl_mode_ignores_the_marker_and_never_refuses_curl(monkeypatch, harness):
+    harness["conductor_accepts_curl"] = True
+    backend = FakeBackend([block(f"echo {MARKER}"), block("curl -X POST http://localhost:8000/submit -d '{}'")])
+    assert run_main(monkeypatch, backend, submit="auto") == 0
+    assert harness["submissions"] == []
+    second = backend.calls[1]
+    assert second[-1]["content"].startswith("<returncode>0</returncode>\n<output>\n" + MARKER)
+    assert (
+        read_results(harness["logs"])["baseline"]["stages"]["diagnosis"]["termination_reason"] == "submitted_by_command"
+    )
+
+
+def test_curl_mode_with_a_budget_is_refused_at_startup(monkeypatch, harness):
+    backend = FakeBackend([submit_block(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_calls="3", submit="curl") == driver.EXIT_INFRA
+    assert harness["submissions"] == [] and backend.calls == []

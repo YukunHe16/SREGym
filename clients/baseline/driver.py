@@ -75,6 +75,9 @@ REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "")
 
 PROTOCOL = os.environ.get("BASELINE_PROTOCOL", "mini")  # mini: one bash block per reply; tools: function calling
+SUBMIT_RAW = os.environ.get(
+    "BASELINE_SUBMIT", "auto"
+)  # mini protocol: curl (as the task says) or marker (driver-owned)
 PROTOCOLS = ("mini", "tools")
 MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "unlimited")
 SUBMISSION_MODE = os.environ.get("BASELINE_SUBMISSION_MODE", "full")
@@ -496,10 +499,15 @@ def run_stage_mini(
     mode: str,
     max_calls: int | None,
     work_dir: str,
+    submit_mode: str = "marker",
     call_offset: int = 0,
     index_offset: int = 0,
 ) -> StageOutcome:
-    """mini-swe-agent's loop: one bash block per reply, one observation per command, the marker ends the stage.
+    """mini-swe-agent's loop: one bash block per reply, one observation per command.
+
+    In ``marker`` mode the stage ends when a command prints the marker line (the driver then submits).
+    In ``curl`` mode the model submits itself, exactly as the task instruction says, and the stage ends
+    when the conductor reports the next stage after a command.
 
     A budget arm (``max_calls`` set) gets one notice when the budget is spent and may then only submit.
     Unlimited arms stop at the hard cap or the deadline without a submission, like a CLI agent timing out.
@@ -598,7 +606,7 @@ def run_stage_mini(
             if format_errors >= mini.MAX_CONSECUTIVE_FORMAT_ERRORS:
                 return outcome(None, "budget_exhausted_no_submission")
             continue
-        if is_external_submit(action):
+        if submit_mode == "marker" and is_external_submit(action):
             used += 1
             session.add_user(
                 rejected(
@@ -621,7 +629,7 @@ def run_stage_mini(
         result = run_command(action, COMMAND_TIMEOUT, cwd=work_dir)
         separator = "\n" if result.stdout and not result.stdout.endswith("\n") else ""
         output = result.stdout + (separator + result.stderr if result.stderr else "")
-        submission = None if result.timed_out else mini.finished(output, result.exit_code)
+        submission = None if (result.timed_out or submit_mode == "curl") else mini.finished(output, result.exit_code)
         transcript.write(
             {
                 "type": "command",
@@ -646,6 +654,9 @@ def run_stage_mini(
             session.add_user(mini.observation_text(result.exit_code, output))
             observed = current_stage()
             if observed not in {stage, None}:
+                if submit_mode == "curl":
+                    logger.info(f"[{stage}] the model submitted with a command; conductor stage is now {observed}")
+                    return outcome(None, "submitted_by_command")
                 logger.error(
                     f"Conductor stage is {observed} after a command; the model bypassed the submission command"
                 )
@@ -738,6 +749,15 @@ def main():
     if PROTOCOL not in PROTOCOLS:
         logger.error(f"BASELINE_PROTOCOL must be one of {PROTOCOLS}")
         sys.exit(EXIT_INFRA)
+    try:
+        submit_mode = (
+            mini.resolve_submit_mode(SUBMIT_RAW, mode=SUBMISSION_MODE, max_commands=max_calls)
+            if PROTOCOL == "mini"
+            else "tool"
+        )
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(EXIT_INFRA)
 
     transcript = Transcript(logs_dir / "baseline_transcript.jsonl")
     results_path = logs_dir / f"baseline_results_{problem_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -759,6 +779,7 @@ def main():
         "model": MODEL,
         "reasoning_effort": REASONING_EFFORT,
         "protocol": PROTOCOL,
+        "submit_mode": submit_mode,
         "context": "session",
         "session_reasoning": SESSION_REASONING,
         "max_commands": "unlimited" if max_calls is None else max_calls,
@@ -791,9 +812,9 @@ def main():
     if PROTOCOL == "mini":
         session.open(
             backend.system_message(mini.system_text()),
-            mini.instance_text(app_info, mode=SUBMISSION_MODE, max_commands=max_calls),
+            mini.instance_text(app_info, mode=SUBMISSION_MODE, max_commands=max_calls, submit_mode=submit_mode),
         )
-        if stage == "mitigation":
+        if stage == "mitigation" and submit_mode == "marker":
             session.add_user(mini.mitigation_text(max_calls))
     else:
         session.open(
@@ -812,6 +833,7 @@ def main():
                 mode=SUBMISSION_MODE,
                 max_calls=max_calls,
                 work_dir=str(logs_dir),
+                submit_mode=submit_mode,
                 **kwargs,
             )
         assert toolbox is not None
@@ -859,7 +881,10 @@ def main():
             wall_seconds=outcome.wall_seconds,
             mechanism_guard_tripped=outcome.mechanism_guard_tripped,
         )
-        if outcome.termination_reason == "external_submission":
+        if outcome.termination_reason == "submitted_by_command":
+            submitted_stages.append("diagnosis")
+            transcript.write({"type": "submit", "stage": "diagnosis", "by": "command"})
+        elif outcome.termination_reason == "external_submission":
             return_code = EXIT_EXTERNAL_SUBMISSION
         elif outcome.termination_reason in no_submission:
             # Like a CLI agent that stops without submitting: nothing is sent and the run ends here.
@@ -886,7 +911,7 @@ def main():
             except TimeoutError:
                 logger.warning("Timed out waiting for the stage after diagnosis")
                 stage = None
-        if stage == "mitigation":
+        if stage == "mitigation" and submit_mode != "curl":  # in curl mode the task text already covers both stages
             session.add_user(
                 mini.mitigation_text(max_calls) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls)
             )
@@ -897,7 +922,10 @@ def main():
         outcome = run("mitigation", call_offset=calls, index_offset=tool_calls)
         usage_records.extend(outcome.usage_records)
         baseline_meta["stages"]["mitigation"] = outcome.summary()
-        if outcome.termination_reason == "external_submission":
+        if outcome.termination_reason == "submitted_by_command":
+            submitted_stages.append("mitigation")
+            transcript.write({"type": "submit", "stage": "mitigation", "by": "command"})
+        elif outcome.termination_reason == "external_submission":
             if return_code == EXIT_OK:
                 return_code = EXIT_EXTERNAL_SUBMISSION
         elif outcome.termination_reason in no_submission:
