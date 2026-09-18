@@ -165,7 +165,7 @@ Namespace: {namespace}
 
 CRITICAL: You are running in an AUTOMATED environment. Work autonomously and make all decisions yourself. DO NOT ask for user confirmation or approval. Proceed with the best solution based on your analysis.
 
-WORKFLOW: You will perform TWO tasks in sequence:
+WORKFLOW: You will perform TWO tasks in sequence. You are starting in the DIAGNOSIS stage; the MITIGATION stage opens only after your diagnosis has been submitted and graded. The two stages take different submissions, so submit the one the current stage calls for.
 
 TASK 1: DIAGNOSIS
 - Investigate the application to detect any anomalies or issues
@@ -185,14 +185,21 @@ HOW TO SUBMIT:
 
 The submission endpoint is: {get_api_base_url()}/submit
 
+Name the stage you are submitting for, so that a submission meant for one stage is never recorded as the other:
+- Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "...", "stage": "diagnosis"}}
+- GET {get_api_base_url()}/status returns the stage that is open right now, e.g. {{"stage": "diagnosis"}}
+- The response to a submission reports the stage it was recorded under, e.g. {{"status": "200", "stage": "diagnosis"}}
+
 For DIAGNOSIS stage:
 - Submit with a natural language description of the issue
-- Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "The frontend service is crashing due to missing environment variable"}}
+- An empty submission is never a valid diagnosis and will be rejected
+- Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "The frontend service is crashing due to missing environment variable", "stage": "diagnosis"}}
 
 For MITIGATION stage:
 - After applying your fix, YOU MUST submit with an EMPTY STRING
-- POST {get_api_base_url()}/submit with JSON: {{"solution": ""}}
+- POST {get_api_base_url()}/submit with JSON: {{"solution": "", "stage": "mitigation"}}
 - This submission is MANDATORY - the conductor needs it to validate your fix
+- Send it only once the mitigation stage is open; during diagnosis it is not the way to finish
 
 Important:
 - You have access to kubectl commands to inspect and modify resources in namespace '{namespace}'

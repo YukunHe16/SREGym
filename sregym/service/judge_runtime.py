@@ -80,6 +80,9 @@ def managed_judge_backend(backend: str = "api", *, force_build: bool = False) ->
         raise ValueError(f"Unknown judge backend: {backend}")
 
     env = _subscription_environment(backend)
+    effort = os.environ.get("JUDGE_REASONING_EFFORT")
+    if effort:  # the bridge passes it to the CLI, as the agent side does with AGENT_REASONING_EFFORT
+        env["JUDGE_REASONING_EFFORT"] = effort
     repo_root = Path(__file__).resolve().parents[2]
     registration = get_agent(backend, repo_root / "agents.yaml")
     if registration is None or not registration.install_script:

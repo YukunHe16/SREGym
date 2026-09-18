@@ -178,6 +178,9 @@ def _configure_model_environment(args) -> tuple[str, str]:
     os.environ["JUDGE_MODEL_ID"] = judge_model
     if reasoning_effort:
         os.environ["AGENT_REASONING_EFFORT"] = reasoning_effort
+    judge_reasoning_effort = getattr(args, "judge_reasoning_effort", None)
+    if judge_reasoning_effort:
+        os.environ["JUDGE_REASONING_EFFORT"] = judge_reasoning_effort
     else:
         os.environ.pop("AGENT_REASONING_EFFORT", None)
 
@@ -863,6 +866,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
         f"🔧 Config — agent: {args.agent}, agent_model: {agent_model}, "
         f"judge_backend: {judge_backend}, judge_model: {judge_model}, "
         f"reasoning_effort: {getattr(args, 'reasoning_effort', None) or 'agent default'}, "
+        f"judge_reasoning_effort: {getattr(args, 'judge_reasoning_effort', None) or 'judge default'}, "
         f"deployment_profile: {get_profile()}, "
         f"internet_access: {internet_policy.mode.value}, "
         f"container_hardening: {args.container_hardening}, "
@@ -1058,6 +1062,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Model for the LLM-as-a-judge evaluator (defaults to --model if not set)",
+    )
+    parser.add_argument(
+        "--judge-reasoning-effort",
+        type=str,
+        default=None,
+        help="Reasoning effort for the LLM-as-a-judge evaluator (CLI judge backends only)",
     )
     parser.add_argument(
         "--judge-backend",

@@ -116,12 +116,15 @@ def _run_codex(prompt: str, model: str, cwd: Path, env: dict[str, str]) -> str:
     for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE"):
         env.pop(key, None)
     response = cwd / "response.txt"
+    effort = env.get("JUDGE_REASONING_EFFORT", "")
+    effort_args = ["-c", f"model_reasoning_effort={effort}"] if effort else []
     output = _execute(
         [
             "codex",
             "exec",
             "--model",
             model,
+            *effort_args,
             "--skip-git-repo-check",
             "--ephemeral",
             "--ignore-user-config",
