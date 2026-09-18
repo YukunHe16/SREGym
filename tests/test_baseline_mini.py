@@ -210,12 +210,35 @@ def test_format_error_counter_resets_after_a_good_action(monkeypatch, harness):
     assert harness["submissions"] == [(DIAGNOSIS, "diagnosis")]
 
 
-def test_unlimited_arm_stops_at_the_hard_cap_without_submitting(monkeypatch, harness):
-    backend = FakeBackend([block("a"), block("b"), block("c"), submit_block(DIAGNOSIS)])
+def test_hard_cap_asks_the_unlimited_arm_to_submit_what_it_has(monkeypatch, harness):
+    backend = FakeBackend([block("a"), block("b"), submit_block(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, hard_cap=2) == 0
+    assert harness["commands"][:2] == ["a", "b"]
+    assert harness["submissions"] == [(DIAGNOSIS, "diagnosis")]
+    notice = backend.calls[2][-1]["content"]
+    assert notice.startswith("You have reached the limit of 2 commands for this stage.")
+    assert f"must start with `{MARKER}`" in notice
+    wrap_up = [r for r in read_transcript(harness["logs"]) if r["type"] == "wrap_up"]
+    assert [(r["reason"], r["commands"]) for r in wrap_up] == [("hard_cap", 2)]
+    assert read_results(harness["logs"])["baseline"]["termination_reason"] == "submitted"
+
+
+def test_stage_ends_without_a_submission_when_the_wrap_up_is_ignored(monkeypatch, harness):
+    backend = FakeBackend([block(c) for c in "abcdef"])
+    monkeypatch.setattr(driver, "WRAP_UP_CALLS", 2)
     assert run_main(monkeypatch, backend, hard_cap=2) == driver.EXIT_NO_SUBMISSION
-    assert harness["commands"] == ["a", "b"] and harness["submissions"] == []
-    assert len(backend.calls) == 2
+    assert harness["commands"] == ["a", "b", "c", "d"] and harness["submissions"] == []
+    assert len(backend.calls) == 4  # two before the cap, two after the notice
     assert read_results(harness["logs"])["baseline"]["termination_reason"] == "hard_cap_no_submission"
+
+
+def test_the_curl_arm_is_told_to_submit_the_way_the_task_describes(monkeypatch, harness):
+    harness["conductor_accepts_curl"] = True
+    backend = FakeBackend([block("a"), block("curl -X POST http://host.docker.internal:8000/submit -d '{}'")])
+    assert run_main(monkeypatch, backend, hard_cap=1, submit="curl") == 0
+    notice = backend.calls[1][-1]["content"]
+    assert "exactly as the task instruction describes" in notice and MARKER not in notice
+    assert read_results(harness["logs"])["baseline"]["termination_reason"] == "submitted_by_command"
 
 
 def test_budget_arm_gets_one_notice_then_may_only_submit(monkeypatch, harness):

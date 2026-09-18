@@ -83,6 +83,8 @@ MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "unlimited")
 SUBMISSION_MODE = os.environ.get("BASELINE_SUBMISSION_MODE", "full")
 TOOLS_RAW = os.environ.get("BASELINE_TOOLS")
 HARD_CAP = int(os.environ.get("BASELINE_HARD_CAP", "80"))
+# Replies an unrestricted arm gets after the wrap-up notice to put its submission through.
+WRAP_UP_CALLS = int(os.environ.get("BASELINE_WRAP_UP_CALLS", "3"))
 COMMAND_TIMEOUT = int(os.environ.get("BASELINE_COMMAND_TIMEOUT", "60"))
 OUTPUT_CHARS = int(os.environ.get("BASELINE_OUTPUT_CHARS", "8000"))
 DEADLINE_S = float(os.environ.get("BASELINE_DEADLINE_S", "1500"))
@@ -511,7 +513,8 @@ def run_stage_mini(
     when the conductor reports the next stage after a command.
 
     A budget arm (``max_calls`` set) gets one notice when the budget is spent and may then only submit.
-    Unlimited arms stop at the hard cap or the deadline without a submission, like a CLI agent timing out.
+    An unrestricted arm that runs into the hard cap or the deadline gets one notice to submit what it has
+    and ``WRAP_UP_CALLS`` replies to do it in; a stage that still does not submit ends without a submission.
     """
     started = time.monotonic()
     usage_records: list[dict] = []
@@ -522,6 +525,8 @@ def run_stage_mini(
     guard_warned = False
     guard_tripped = False
     budget_notice_sent = False
+    wrap_up_sent = False
+    wrap_up_calls = 0
     records = 0
 
     def outcome(text: str | None, reason: str) -> StageOutcome:
@@ -542,11 +547,21 @@ def run_stage_mini(
         return mini.REJECTED_COMMAND_OBSERVATION.format(reason=reason)
 
     while True:
+        limit = None
         if time.monotonic() - started > DEADLINE_S:
-            return outcome(None, "deadline_no_submission")
+            limit = ("deadline", "the time limit")
+        elif max_calls is None and used >= HARD_CAP:
+            limit = ("hard_cap", f"the limit of {HARD_CAP} commands")
+        if limit is not None:
+            if not wrap_up_sent:
+                wrap_up_sent = True
+                logger.info(f"[{stage}] {limit[0]} reached; asking for a submission")
+                transcript.write({"type": "wrap_up", "stage": stage, "reason": limit[0], "commands": used})
+                session.add_user(mini.wrap_up_text(limit[1], submit_mode))
+            if wrap_up_calls >= WRAP_UP_CALLS:
+                return outcome(None, f"{limit[0]}_no_submission")
+            wrap_up_calls += 1
         budget_exhausted = max_calls is not None and used >= max_calls
-        if max_calls is None and used >= HARD_CAP:
-            return outcome(None, "hard_cap_no_submission")
         if budget_exhausted and not budget_notice_sent:
             session.add_user(mini.budget_exhausted_text(max_calls) if max_calls else mini.ZERO_BUDGET_RULE.strip())
             budget_notice_sent = True

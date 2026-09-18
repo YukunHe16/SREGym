@@ -128,6 +128,14 @@ Please try another command and make sure to avoid those requiring interactive in
 BUDGET_EXHAUSTED_TEMPLATE = """You have used the {max_commands} commands allowed in this stage. The only action left is the submission command
 (its output must start with `{marker}`). Submit your best answer now."""
 
+WRAP_UP_TEMPLATE = """You have reached {reason} for this stage. Stop investigating and submit your best answer now,
+based on what you already know. {how}"""
+
+WRAP_UP_HOW = {
+    "curl": "Submit it to the conductor exactly as the task instruction describes.",
+    "marker": f"The only action left is the submission command (its output must start with `{MARKER}`).",
+}
+
 REJECTED_COMMAND_OBSERVATION = "<returncode>126</returncode>\n<output>\nrejected: {reason}\n</output>"
 
 GUARD_REJECTION = (
@@ -218,6 +226,13 @@ def timeout_text(action: str, output: str) -> str:
 
 def budget_exhausted_text(max_commands: int) -> str:
     return BUDGET_EXHAUSTED_TEMPLATE.format(max_commands=max_commands, marker=MARKER)
+
+
+def wrap_up_text(reason: str, submit_mode: str) -> str:
+    """The one notice an unrestricted arm gets when it runs into the driver's limits."""
+    if submit_mode not in WRAP_UP_HOW:
+        raise ValueError(f"unknown submit mode: {submit_mode}")
+    return WRAP_UP_TEMPLATE.format(reason=reason, how=WRAP_UP_HOW[submit_mode])
 
 
 def finished(output: str, returncode: int) -> str | None:
