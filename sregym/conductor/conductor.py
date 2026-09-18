@@ -949,14 +949,6 @@ class Conductor:
                     requested_stage = "mitigation" if solution == "" else "diagnosis"
             if requested_stage not in SUBMISSION_STAGES:
                 raise ValueError(f"Unknown submission stage: {requested_stage!r}")
-            if requested_stage == "diagnosis" and solution == "":
-                # An empty diagnosis is never an answer. Clients that finish the fault off during
-                # diagnosis reach for the mitigation stage's empty submission; tell them so instead
-                # of closing the stage with nothing for the judge to read.
-                raise ValueError(
-                    "An empty solution is not a diagnosis. Submit the description of the issue you found; "
-                    "the empty submission belongs to the mitigation stage, which is not open yet."
-                )
             generation = self._register_pending_submission_locked(requested_stage)
             return requested_stage, generation
 

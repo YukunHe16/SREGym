@@ -192,7 +192,7 @@ Name the stage you are submitting for, so that a submission meant for one stage 
 
 For DIAGNOSIS stage:
 - Submit with a natural language description of the issue
-- An empty submission is never a valid diagnosis and will be rejected
+- An empty submission is recorded as your diagnosis, closing the stage with nothing to evaluate
 - Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "The frontend service is crashing due to missing environment variable", "stage": "diagnosis"}}
 
 For MITIGATION stage:

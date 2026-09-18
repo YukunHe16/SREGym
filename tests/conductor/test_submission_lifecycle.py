@@ -355,21 +355,14 @@ def test_legacy_nonempty_mitigation_uses_current_stage(monkeypatch):
     _wait_for_current_evaluation(conductor)
 
 
-def test_an_empty_diagnosis_is_rejected_rather_than_recorded(monkeypatch):
-    """An empty solution can never be an answer: a client that reaches for the mitigation stage's
-    submission while diagnosis is still open is told so, instead of closing the stage with nothing."""
+def test_legacy_empty_diagnosis_uses_idle_current_stage(monkeypatch):
     conductor = _conductor()
     monkeypatch.setattr(conductor_api, "_conductor", conductor)
 
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(conductor_api.submit_solution(conductor_api.SubmitRequest(solution="")))
+    response = asyncio.run(conductor_api.submit_solution(conductor_api.SubmitRequest(solution="")))
 
-    assert exc.value.status_code == 400 and "not a diagnosis" in exc.value.detail
-    with pytest.raises(HTTPException):  # naming the stage does not make it valid either
-        asyncio.run(
-            conductor_api.submit_solution(conductor_api.SubmitRequest(solution="", stage="diagnosis"))
-        )
-    assert conductor.submission_state()[0] == "diagnosis"  # the stage is still open for a real answer
+    assert response["stage"] == "diagnosis"
+    _wait_for_current_evaluation(conductor)
 
 
 def test_http_api_waits_for_early_mitigation_and_rejects_duplicate_diagnosis(monkeypatch):
