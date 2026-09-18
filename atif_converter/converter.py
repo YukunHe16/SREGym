@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, cast
 
-from .adapters import claudecode, codex, copilot, gemini, opencode, stratus
+from .adapters import baseline, claudecode, codex, copilot, gemini, opencode, stratus
 from .atif import Trajectory
 from .errors import (
     AtifConverterError,
@@ -16,8 +16,9 @@ from .errors import (
     UnsupportedFormatError,
 )
 
-AgentName = Literal["claudecode", "codex", "copilot", "gemini", "opencode", "stratus"]
+AgentName = Literal["baseline", "claudecode", "codex", "copilot", "gemini", "opencode", "stratus"]
 SUPPORTED_AGENTS: tuple[AgentName, ...] = (
+    "baseline",
     "claudecode",
     "codex",
     "copilot",
@@ -27,6 +28,7 @@ SUPPORTED_AGENTS: tuple[AgentName, ...] = (
 )
 
 _CONVERTERS = {
+    "baseline": baseline.convert_file,
     "claudecode": claudecode.convert_file,
     "codex": codex.convert_file,
     "copilot": copilot.convert_file,
@@ -147,6 +149,12 @@ def _looks_like_gemini(root: dict | None, records: list[dict]) -> bool:
     )
 
 
+def _looks_like_baseline(records: list[dict]) -> bool:
+    return any(
+        record.get("type") == "meta" and "protocol" in record and "submission_mode" in record for record in records
+    )
+
+
 def _looks_like_stratus(records: list[dict]) -> bool:
     return any(
         record.get("type") == "event" and "stage" in record and isinstance(record.get("messages"), list)
@@ -209,6 +217,8 @@ def detect_agent(session_file: Path | str) -> AgentName:
         return "opencode"
     if _looks_like_gemini(root, records):
         return "gemini"
+    if _looks_like_baseline(records):
+        return "baseline"
     if _looks_like_stratus(records):
         return "stratus"
     if _looks_like_codex(records):
