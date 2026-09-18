@@ -25,6 +25,9 @@ DEFAULT_API_MAX_TOKENS = 65536
 API_RETRY_WAIT_S = 5
 API_RATE_LIMIT_RETRIES = 6
 API_RATE_LIMIT_WAIT_S = 60
+# A gateway or DNS blip on the way out of the container is not the model's answer: wait it out.
+API_TRANSIENT_RETRIES = 5
+API_TRANSIENT_WAIT_S = 30
 
 
 @dataclass
@@ -63,6 +66,29 @@ class Reply:
 def is_rate_limit(exc: Exception) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     return "ratelimit" in text or "rate limit" in text or "429" in text or "too many requests" in text
+
+
+_TRANSIENT = (
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "no address associated with hostname",
+    "temporary failure in name resolution",
+    "connection reset",
+    "connection refused",
+    "connection error",
+    "apiconnectionerror",
+    "internalservererror",
+    " 502",
+    " 503",
+    " 504",
+)
+
+
+def is_transient(exc: Exception) -> bool:
+    """A failure of the path to the provider rather than of the request."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(needle in text for needle in _TRANSIENT)
 
 
 # Valid JSON escapes are consumed as pairs so they stay intact; any other backslash is a stray one.
@@ -200,6 +226,7 @@ class ApiBackend:
         error: str | None = None
         plain_attempts = 0
         rate_limit_attempts = 0
+        transient_attempts = 0
         while True:
             try:
                 reply = self._completion_with_deadline(request)
@@ -210,6 +237,10 @@ class ApiBackend:
                 if is_rate_limit(exc) and rate_limit_attempts < API_RATE_LIMIT_RETRIES:
                     rate_limit_attempts += 1
                     time.sleep(API_RATE_LIMIT_WAIT_S)
+                    continue
+                if is_transient(exc) and transient_attempts < API_TRANSIENT_RETRIES:
+                    transient_attempts += 1
+                    time.sleep(API_TRANSIENT_WAIT_S)
                     continue
                 plain_attempts += 1
                 if plain_attempts >= 2:

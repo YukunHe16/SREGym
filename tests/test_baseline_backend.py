@@ -226,3 +226,34 @@ def test_an_empty_reply_truncated_at_max_tokens_stays_an_error(tmp_path, monkeyp
     monkeypatch.setattr(litellm, "completion", lambda **kwargs: response("", (), reasoning="still thinking", finish="length"))
     reply = backend.complete([{"role": "user", "content": "go"}], [], step_dir=tmp_path / "r2")
     assert reply.error is not None and "max_tokens" in reply.error and not reply.content_from_reasoning
+
+
+def test_a_gateway_or_dns_blip_is_waited_out(tmp_path, monkeypatch):
+    backend = ApiBackend("openai/deepseek-flash", "high", env={**ENV, "BASELINE_API_STREAM": "0"})
+    assert backends.is_transient(Exception("BadGatewayError: 502 Bad Gateway [Errno -5] No address associated with hostname"))
+    assert backends.is_transient(Exception("APIConnectionError: connection reset by peer"))
+    assert not backends.is_transient(Exception("BadRequestError: your prompt is malformed"))
+    monkeypatch.setattr(backends.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] < 4:
+            raise Exception("BadGatewayError: 502 Bad Gateway")
+        return response("recovered")
+
+    monkeypatch.setattr(litellm, "completion", flaky)
+    reply = backend.complete([{"role": "user", "content": "go"}], [], step_dir=tmp_path / "t1")
+    assert reply.error is None and reply.content == "recovered" and calls["n"] == 4
+
+
+def test_a_gateway_outage_that_outlasts_the_retries_still_fails(tmp_path, monkeypatch):
+    backend = ApiBackend("openai/deepseek-flash", "high", env={**ENV, "BASELINE_API_STREAM": "0"})
+    monkeypatch.setattr(backends.time, "sleep", lambda _: None)
+
+    def always(**kwargs):
+        raise Exception("BadGatewayError: 502 Bad Gateway")
+
+    monkeypatch.setattr(litellm, "completion", always)
+    reply = backend.complete([{"role": "user", "content": "go"}], [], step_dir=tmp_path / "t2")
+    assert reply.error is not None and "BadGateway" in reply.error
