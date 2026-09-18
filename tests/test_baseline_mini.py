@@ -129,6 +129,22 @@ def test_instance_text_wraps_the_verbatim_task_with_mini_rules():
     assert "exactly ONE bash code block" in mini.system_text()
 
 
+def test_the_workflow_is_off_by_default_and_domain_general_when_on():
+    bare = mini.instance_text(APP, mode="full", max_commands=None)
+    assert "## How to work" not in bare
+    with_workflow = mini.instance_text(APP, mode="full", max_commands=None, workflow="general")
+    assert with_workflow.startswith(bare) and "## How to work" in with_workflow
+    curl = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl", workflow="general")
+    assert "## How to work" in curl and "new subshell" in curl
+    assert "one thing at a time" in mini.mitigation_text(None, "general")
+    assert "one thing at a time" not in mini.mitigation_text(None)
+    # nothing in it may name where to look or what the judge scores
+    for banned in ("kubectl", "Kubernetes", "pod", "CronJob", "Service", "namespace", "root cause", "affected"):
+        assert banned.lower() not in mini.WORKFLOW_TEXT.lower(), banned
+    with pytest.raises(ValueError):
+        mini.instance_text(APP, mode="full", max_commands=None, workflow="nope")
+
+
 def test_parse_action_requires_exactly_one_block():
     assert mini.parse_action(block("kubectl get pods")) == ("kubectl get pods", 1)
     assert mini.parse_action("no block here") == (None, 0)

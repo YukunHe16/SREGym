@@ -81,6 +81,9 @@ SUBMIT_RAW = os.environ.get(
 PROTOCOLS = ("mini", "tools")
 MAX_COMMANDS_RAW = os.environ.get("BASELINE_MAX_COMMANDS", "unlimited")
 SUBMISSION_MODE = os.environ.get("BASELINE_SUBMISSION_MODE", "full")
+# "general" adds the domain-general workflow to the task turn; "none" (the default) leaves the
+# baseline with SREGym's task text and the protocol's own rules only.
+WORKFLOW = os.environ.get("BASELINE_WORKFLOW", "none")
 TOOLS_RAW = os.environ.get("BASELINE_TOOLS")
 HARD_CAP = int(os.environ.get("BASELINE_HARD_CAP", "80"))
 # Replies an unrestricted arm gets after the wrap-up notice to put its submission through.
@@ -817,6 +820,7 @@ def main():
         "max_commands": "unlimited" if max_calls is None else max_calls,
         "submission_mode": SUBMISSION_MODE,
         "tools": tool_status,
+        "workflow": WORKFLOW,
         "hard_cap": HARD_CAP,
         "deadline_s": DEADLINE_S,
         "output_chars": OUTPUT_CHARS,
@@ -844,10 +848,16 @@ def main():
     if PROTOCOL == "mini":
         session.open(
             backend.system_message(mini.system_text()),
-            mini.instance_text(app_info, mode=SUBMISSION_MODE, max_commands=max_calls, submit_mode=submit_mode),
+            mini.instance_text(
+                app_info,
+                mode=SUBMISSION_MODE,
+                max_commands=max_calls,
+                submit_mode=submit_mode,
+                workflow=WORKFLOW,
+            ),
         )
         if stage == "mitigation" and submit_mode == "marker":
-            session.add_user(mini.mitigation_text(max_calls))
+            session.add_user(mini.mitigation_text(max_calls, WORKFLOW))
     else:
         session.open(
             backend.system_message(protocol.system_text(SUBMISSION_MODE)),
@@ -945,7 +955,7 @@ def main():
                 stage = None
         if stage == "mitigation" and submit_mode != "curl":  # in curl mode the task text already covers both stages
             session.add_user(
-                mini.mitigation_text(max_calls) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls)
+                mini.mitigation_text(max_calls, WORKFLOW) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls)
             )
     else:
         logger.info("Benchmark starts at mitigation; skipping diagnosis")

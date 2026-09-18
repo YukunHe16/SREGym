@@ -67,6 +67,25 @@ SUBMISSION_RULES = {
     ),
 }
 
+WORKFLOW_MODES = ("none", "general")
+# The designed prompt, kept deliberately domain-general: it says how to investigate, never where to look.
+# Nothing here names a kind of Kubernetes object, a class of fault, or anything the judge scores, so the
+# same text would be right on a benchmark whose faults were distributed completely differently.
+WORKFLOW_TEXT = """
+
+## How to work
+
+1. Before each command, say what you currently think is wrong and what this command would tell you.
+   A command whose result cannot change your mind is not worth running.
+2. Read the output you asked for before asking for more, and say what it rules in and what it rules out.
+3. If two commands in a row tell you nothing new about the current idea, drop it and try another one.
+4. Survey the whole system before going deep into any one part of it.
+5. Stop as soon as your evidence answers the task. Evidence gathered after that point cannot improve your
+   answer, and the stage ends whether or not you have submitted."""
+
+MITIGATION_WORKFLOW_TEXT = """
+Change one thing at a time and check its effect before making the next change."""
+
 INSTANCE_TEMPLATE = """{task}
 
 ## Important Rules
@@ -180,22 +199,34 @@ def resolve_submit_mode(value: str, *, mode: str, max_commands: int | None) -> s
     return value
 
 
-def instance_text(app_info: dict, *, mode: str, max_commands: int | None, submit_mode: str = "marker") -> str:
-    """The first user turn: SREGym's task instruction (verbatim); marker mode appends mini-swe-agent's rules."""
+def workflow_text(workflow: str) -> str:
+    if workflow not in WORKFLOW_MODES:
+        raise ValueError(f"Unknown workflow: {workflow}")
+    return WORKFLOW_TEXT if workflow == "general" else ""
+
+
+def instance_text(
+    app_info: dict, *, mode: str, max_commands: int | None, submit_mode: str = "marker", workflow: str = "none"
+) -> str:
+    """The first user turn: SREGym's task instruction (verbatim), the protocol's own rules, and — only when
+    the arm asks for it — the general workflow."""
     if mode not in SUBMISSION_MODES:
         raise ValueError(f"Unknown submission mode: {mode}")
     if submit_mode == "curl":
-        return build_task_text(app_info).rstrip() + CURL_INSTANCE_NOTE
-    return INSTANCE_TEMPLATE.format(
-        task=build_task_text(app_info).rstrip(),
-        budget_rule=budget_rule(max_commands),
-        marker=MARKER,
-        submit_example=SUBMIT_DIAGNOSIS_EXAMPLE[mode],
-        submission_rules=SUBMISSION_RULES[mode],
+        return build_task_text(app_info).rstrip() + CURL_INSTANCE_NOTE + workflow_text(workflow)
+    return (
+        INSTANCE_TEMPLATE.format(
+            task=build_task_text(app_info).rstrip(),
+            budget_rule=budget_rule(max_commands),
+            marker=MARKER,
+            submit_example=SUBMIT_DIAGNOSIS_EXAMPLE[mode],
+            submission_rules=SUBMISSION_RULES[mode],
+        )
+        + workflow_text(workflow)
     )
 
 
-def mitigation_text(max_commands: int | None) -> str:
+def mitigation_text(max_commands: int | None, workflow: str = "none") -> str:
     line = ""
     if max_commands is not None:
         line = (
@@ -203,7 +234,8 @@ def mitigation_text(max_commands: int | None) -> str:
             if max_commands == 0
             else f"\nYou may run at most {max_commands} commands in this stage; the finishing command does not count."
         )
-    return MITIGATION_TEMPLATE.format(marker=MARKER, budget_line=line)
+    extra = MITIGATION_WORKFLOW_TEXT if workflow_text(workflow) else ""
+    return MITIGATION_TEMPLATE.format(marker=MARKER, budget_line=line) + extra
 
 
 def parse_action(content: str) -> tuple[str | None, int]:
