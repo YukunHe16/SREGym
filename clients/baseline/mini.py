@@ -14,15 +14,25 @@ from __future__ import annotations
 import re
 
 from clients.baseline.protocol import MECHANISM_GUARD, SUBMISSION_MODES, build_task_text
+from clients.codex.driver import get_api_base_url as conductor_url
 
 MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 SUBMIT_MODES = ("auto", "curl", "marker")
 # curl: the model submits exactly as the task instruction says (POST /submit itself) and the driver only
 # watches the conductor's stage; this is the CLI agents' condition and the default for unrestricted arms.
 # marker: the driver owns the submission through the marker command; needed by budget and no_mechanism arms.
+# The conductor reports the open stage and accepts a stage on a submission, but SREGym's task text
+# mentions neither, so an agent that finishes the fault off during diagnosis reaches for the mitigation
+# stage's empty submission and loses the stage. State what the harness knows; add nothing about the task.
 CURL_INSTANCE_NOTE = """
 
-Note: every command is executed in a new subshell; directory or environment variable changes do not persist."""
+Note: every command is executed in a new subshell; directory or environment variable changes do not persist.
+
+Current stage: diagnosis; the mitigation stage opens only after this one has been submitted and graded.
+GET {api}/status reports the stage that is open right now, e.g. {{"stage": "diagnosis"}}, and a submission
+may name the stage it is for — POST {api}/submit with {{"solution": "...", "stage": "diagnosis"}} — so that a
+submission meant for one stage is never recorded as the other. The empty submission described above belongs
+to the mitigation stage; sent during diagnosis it is recorded as your diagnosis, with nothing to evaluate."""
 ACTION_REGEX = re.compile(r"```bash\s*\n(.*?)\n```", re.DOTALL)
 OUTPUT_LIMIT = 10_000  # mini-swe-agent's observation limit: head and tail of 5,000 characters each
 MAX_CONSECUTIVE_FORMAT_ERRORS = 3
@@ -203,7 +213,8 @@ def instance_text(app_info: dict, *, mode: str, max_commands: int | None, submit
     if mode not in SUBMISSION_MODES:
         raise ValueError(f"Unknown submission mode: {mode}")
     if submit_mode == "curl":
-        return build_task_text(app_info).rstrip() + CURL_INSTANCE_NOTE + WORKFLOW_TEXT
+        note = CURL_INSTANCE_NOTE.format(api=conductor_url())
+        return build_task_text(app_info).rstrip() + note + WORKFLOW_TEXT
     return (
         INSTANCE_TEMPLATE.format(
             task=build_task_text(app_info).rstrip(),

@@ -435,8 +435,13 @@ def test_a_curl_stage_ends_on_the_conductors_receipt_not_on_the_stage_flip(monke
 
 def test_curl_mode_instance_is_the_task_plus_the_note_and_the_workflow():
     text = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
-    assert text == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
+    note = mini.CURL_INSTANCE_NOTE.format(api=mini.conductor_url())
+    assert text == mini.build_task_text(APP).rstrip() + note + mini.WORKFLOW_TEXT
     assert "Important Rules" not in text and MARKER not in text
+    # what the harness knows and the model cannot: which stage is open, and how to name it
+    assert "Current stage: diagnosis;" in text
+    assert "/status reports the stage that is open right now" in text
+    assert '"stage": "diagnosis"' in text and "belongs\nto the mitigation stage" in text
 
 
 def test_curl_mode_lets_the_model_submit_itself_through_both_stages(monkeypatch, harness):
@@ -453,7 +458,7 @@ def test_curl_mode_lets_the_model_submit_itself_through_both_stages(monkeypatch,
     assert harness["submissions"] == []  # the driver posts nothing; the model did it
     assert len(harness["commands"]) == 4
     first = backend.calls[0]
-    assert first[1]["content"] == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
+    assert first[1]["content"] == mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
     # no stage-change message: the conversation just continues with the observation of the curl command
     third = backend.calls[2]
     assert third[-1]["role"] == "user" and third[-1]["content"].startswith("<returncode>0</returncode>")
