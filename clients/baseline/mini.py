@@ -227,6 +227,14 @@ def mitigation_text(max_commands: int | None) -> str:
     return MITIGATION_TEMPLATE.format(marker=MARKER, budget_line=line) + MITIGATION_WORKFLOW_TEXT
 
 
+def accepted_submission(output: str, stage: str) -> bool:
+    """The conductor's own receipt for this stage, as a submission command prints it."""
+    return bool(
+        re.search(r'"message"\s*:\s*"Submission received"', output or "")
+        and re.search(rf'"stage"\s*:\s*"{re.escape(stage)}"', output or "")
+    )
+
+
 def parse_action(content: str) -> tuple[str | None, int]:
     """(the single action, number of code blocks found); the action is None unless exactly one block is present."""
     actions = ACTION_REGEX.findall(content or "")

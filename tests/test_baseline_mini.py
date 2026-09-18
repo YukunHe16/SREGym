@@ -80,9 +80,12 @@ def harness(monkeypatch, tmp_path):
         if MARKER in cmd:  # emulate the heredoc / echo: print what the command would print
             body = cmd.split("\n", 1)[1].rsplit("\nEOF", 1)[0] if "<<'EOF'" in cmd else MARKER
             return tools.CommandResult(body + "\n", "", 0, 0.01)
-        if "/submit" in cmd and state.get("conductor_accepts_curl"):  # the conductor advances the stage
-            state["current"] = "mitigation" if state["current"] == "diagnosis" else "done"
-            return tools.CommandResult('{"status": "200", "message": "Submission received"}\n', "", 0, 0.05)
+        if "/submit" in cmd and state.get("conductor_accepts_curl"):
+            stage = state["current"]
+            if not state.get("conductor_evaluates_slowly"):  # otherwise the stage only flips later, as in a real run
+                state["current"] = "mitigation" if stage == "diagnosis" else "done"
+            receipt = '{"status":"200","message":"Submission received","stage":"%s"}\n' % stage
+            return tools.CommandResult(receipt, "", 0, 0.05)
         if cmd.startswith("sleep"):
             return tools.CommandResult("", "", 124, 60.0, timed_out=True)
         return tools.CommandResult("pod-a Running\n", "warn\n", 0, 0.01)
@@ -411,6 +414,23 @@ def test_resolve_submit_mode():
         mini.resolve_submit_mode("curl", mode="full", max_commands=3)
     with pytest.raises(ValueError):
         mini.resolve_submit_mode("nope", mode="full", max_commands=None)
+
+
+def test_a_curl_stage_ends_on_the_conductors_receipt_not_on_the_stage_flip(monkeypatch, harness):
+    """The oracle takes its time; a CLI agent's own harness stops at this point, so this one does too."""
+    harness["stages"] = ["diagnosis", "mitigation", "done"]
+    harness["conductor_accepts_curl"] = True
+    harness["conductor_evaluates_slowly"] = True
+    submit = block("curl -s -X POST http://localhost:8000/submit -d '{\"solution\": \"the selector is wrong\"}'")
+    backend = FakeBackend([block("kubectl get pods"), submit, block("kubectl get svc"), submit])
+    assert run_main(monkeypatch, backend, submit="curl") == 0
+    assert len(harness["commands"]) == 4  # two per stage: one look, one submission, and nothing after it
+    assert harness["submissions"] == []  # the driver posts nothing; the model did it
+    assert mini.accepted_submission('{"status":"200","message":"Submission received","stage":"diagnosis"}', "diagnosis")
+    assert not mini.accepted_submission('{"status":"200","message":"Submission received","stage":"mitigation"}', "diagnosis")
+    assert not mini.accepted_submission('{"detail":"already being evaluated."}', "diagnosis")
+    results = read_results(harness["logs"])
+    assert results["baseline"]["submitted_stages"] == ["diagnosis", "mitigation"]
 
 
 def test_curl_mode_instance_is_the_task_plus_the_note_and_the_workflow():

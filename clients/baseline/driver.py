@@ -684,6 +684,11 @@ def run_stage_mini(
         if submission is None:
             used += 1
             session.add_user(with_budget(mini.observation_text(result.exit_code, output)))
+            if submit_mode == "curl" and is_external_submit(action) and mini.accepted_submission(output, stage):
+                # The conductor has the submission. A CLI agent's own harness ends here; keep asking for
+                # commands and the model only spins until the stage flips, with kubectl still in its hands.
+                logger.info(f"[{stage}] the conductor accepted the model's submission; ending the stage")
+                return outcome(None, "submitted_by_command")
             observed = current_stage()
             if observed not in {stage, None}:
                 if submit_mode == "curl":
