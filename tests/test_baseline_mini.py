@@ -210,6 +210,31 @@ def test_format_error_counter_resets_after_a_good_action(monkeypatch, harness):
     assert harness["submissions"] == [(DIAGNOSIS, "diagnosis")]
 
 
+def test_budget_notice_counts_from_the_first_command_and_turns_urgent_at_the_end():
+    early = mini.budget_notice(used=3, cap=80, seconds_left=1400, submit_mode="marker")
+    assert early == "\n<budget>command 3 of 80, about 23 minutes left in this stage</budget>"
+    near_cap = mini.budget_notice(used=70, cap=80, seconds_left=1400, submit_mode="marker")
+    assert "10 commands left in this stage" in near_cap and "submit your best answer now" in near_cap
+    assert f"must start with `{MARKER}`" in near_cap
+    near_time = mini.budget_notice(used=3, cap=80, seconds_left=120, submit_mode="curl")
+    assert "about 2 minutes left" in near_time and "as the task instruction describes" in near_time
+    both = mini.budget_notice(used=79, cap=80, seconds_left=30, submit_mode="marker")
+    assert "1 command and about 0 minutes left" in both
+
+
+def test_every_observation_of_an_unlimited_arm_carries_the_budget(monkeypatch, harness):
+    backend = FakeBackend([block("a"), block("b"), submit_block(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, hard_cap=80) == 0
+    assert "<budget>command 1 of 80" in backend.calls[1][-1]["content"]
+    assert "<budget>command 2 of 80" in backend.calls[2][-1]["content"]
+
+
+def test_a_budget_arm_is_left_alone(monkeypatch, harness):
+    backend = FakeBackend([block("a"), submit_block(DIAGNOSIS)])
+    assert run_main(monkeypatch, backend, max_calls="3") == 0
+    assert "<budget>" not in backend.calls[1][-1]["content"]
+
+
 def test_hard_cap_asks_the_unlimited_arm_to_submit_what_it_has(monkeypatch, harness):
     backend = FakeBackend([block("a"), block("b"), submit_block(DIAGNOSIS)])
     assert run_main(monkeypatch, backend, hard_cap=2) == 0

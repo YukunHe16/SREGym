@@ -546,6 +546,18 @@ def run_stage_mini(
     def rejected(reason: str) -> str:
         return mini.REJECTED_COMMAND_OBSERVATION.format(reason=reason)
 
+    def with_budget(text: str) -> str:
+        """Unrestricted arms see how much of the stage is left after every command; budget arms
+        already carry their allowance in the instance prompt and are left untouched."""
+        if max_calls is not None:
+            return text
+        return text + mini.budget_notice(
+            used=used,
+            cap=HARD_CAP,
+            seconds_left=DEADLINE_S - (time.monotonic() - started),
+            submit_mode=submit_mode,
+        )
+
     while True:
         limit = None
         if time.monotonic() - started > DEADLINE_S:
@@ -667,11 +679,11 @@ def run_stage_mini(
         )
         if result.timed_out:
             used += 1
-            session.add_user(mini.timeout_text(action, output))
+            session.add_user(with_budget(mini.timeout_text(action, output)))
             continue
         if submission is None:
             used += 1
-            session.add_user(mini.observation_text(result.exit_code, output))
+            session.add_user(with_budget(mini.observation_text(result.exit_code, output)))
             observed = current_stage()
             if observed not in {stage, None}:
                 if submit_mode == "curl":

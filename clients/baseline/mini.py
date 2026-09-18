@@ -128,6 +128,18 @@ Please try another command and make sure to avoid those requiring interactive in
 BUDGET_EXHAUSTED_TEMPLATE = """You have used the {max_commands} commands allowed in this stage. The only action left is the submission command
 (its output must start with `{marker}`). Submit your best answer now."""
 
+COUNTDOWN_COMMANDS = 15  # the last stretch before the cap, where the notice turns urgent
+COUNTDOWN_SECONDS = 300  # ... and the last stretch before the stage deadline
+
+BUDGET_LINE_TEMPLATE = "\n<budget>command {used} of {cap}, about {minutes} minutes left in this stage</budget>"
+
+LIMIT_NOTICE_TEMPLATE = """
+<IMPORTANT>
+You have {left} left in this stage. When that runs out the stage ends, and if you have not submitted by then,
+nothing is recorded for it. Stop pulling on whatever thread you are on and come back to the big picture:
+submit your best answer now. {how}
+</IMPORTANT>"""
+
 WRAP_UP_TEMPLATE = """You have reached {reason} for this stage. Stop investigating and submit your best answer now,
 based on what you already know. {how}"""
 
@@ -226,6 +238,26 @@ def timeout_text(action: str, output: str) -> str:
 
 def budget_exhausted_text(max_commands: int) -> str:
     return BUDGET_EXHAUSTED_TEMPLATE.format(max_commands=max_commands, marker=MARKER)
+
+
+def budget_notice(*, used: int, cap: int, seconds_left: float, submit_mode: str) -> str:
+    """What every observation of an unrestricted arm carries: how much of the stage is left.
+
+    It states the budget and nothing else — never a hint about where the fault might be — so an arm
+    that paces itself is still being scored on its own investigation. mini-swe-agent's long-horizon
+    config does the same thing for the last stretch; here the count runs from the first command,
+    because a stage of open-ended diagnosis has no finish line the model can see for itself.
+    """
+    commands_left = max(cap - used, 0)
+    minutes = max(int(seconds_left // 60), 0)
+    urgent = []
+    if commands_left <= COUNTDOWN_COMMANDS:
+        urgent.append(f"{commands_left} command{'' if commands_left == 1 else 's'}")
+    if seconds_left <= COUNTDOWN_SECONDS:
+        urgent.append(f"about {minutes} minute{'' if minutes == 1 else 's'}")
+    if urgent:
+        return LIMIT_NOTICE_TEMPLATE.format(left=" and ".join(urgent), how=WRAP_UP_HOW[submit_mode])
+    return BUDGET_LINE_TEMPLATE.format(used=used, cap=cap, minutes=minutes)
 
 
 def wrap_up_text(reason: str, submit_mode: str) -> str:
