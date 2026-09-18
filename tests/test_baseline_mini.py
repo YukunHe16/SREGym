@@ -129,20 +129,15 @@ def test_instance_text_wraps_the_verbatim_task_with_mini_rules():
     assert "exactly ONE bash code block" in mini.system_text()
 
 
-def test_the_workflow_is_off_by_default_and_domain_general_when_on():
-    bare = mini.instance_text(APP, mode="full", max_commands=None)
-    assert "## How to work" not in bare
-    with_workflow = mini.instance_text(APP, mode="full", max_commands=None, workflow="general")
-    assert with_workflow.startswith(bare) and "## How to work" in with_workflow
-    curl = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl", workflow="general")
+def test_the_workflow_is_part_of_the_prompt_and_stays_domain_general():
+    text = mini.instance_text(APP, mode="full", max_commands=None)
+    assert "## How to work" in text and text.index("## How to work") > text.index("## How to submit")
+    curl = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
     assert "## How to work" in curl and "new subshell" in curl
-    assert "one thing at a time" in mini.mitigation_text(None, "general")
-    assert "one thing at a time" not in mini.mitigation_text(None)
-    # nothing in it may name where to look or what the judge scores
+    assert "one thing at a time" in mini.mitigation_text(None)
+    # it may say how to investigate, never where to look or what the judge scores
     for banned in ("kubectl", "Kubernetes", "pod", "CronJob", "Service", "namespace", "root cause", "affected"):
         assert banned.lower() not in mini.WORKFLOW_TEXT.lower(), banned
-    with pytest.raises(ValueError):
-        mini.instance_text(APP, mode="full", max_commands=None, workflow="nope")
 
 
 def test_parse_action_requires_exactly_one_block():
@@ -418,9 +413,9 @@ def test_resolve_submit_mode():
         mini.resolve_submit_mode("nope", mode="full", max_commands=None)
 
 
-def test_curl_mode_instance_is_the_task_plus_one_note():
+def test_curl_mode_instance_is_the_task_plus_the_note_and_the_workflow():
     text = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
-    assert text == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE
+    assert text == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
     assert "Important Rules" not in text and MARKER not in text
 
 
@@ -438,7 +433,7 @@ def test_curl_mode_lets_the_model_submit_itself_through_both_stages(monkeypatch,
     assert harness["submissions"] == []  # the driver posts nothing; the model did it
     assert len(harness["commands"]) == 4
     first = backend.calls[0]
-    assert first[1]["content"] == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE
+    assert first[1]["content"] == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
     # no stage-change message: the conversation just continues with the observation of the curl command
     third = backend.calls[2]
     assert third[-1]["role"] == "user" and third[-1]["content"].startswith("<returncode>0</returncode>")

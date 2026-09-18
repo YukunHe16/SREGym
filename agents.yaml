@@ -86,21 +86,6 @@ agents:
       BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
     install_script: null
     agent_version: null
-  # Same as `baseline` plus the domain-general workflow in the task turn (BASELINE_WORKFLOW=general):
-  # the pair measures what that section of the prompt is worth on its own.
-  - name: baseline_workflow
-    kickoff_command: python -m clients.baseline.driver
-    kickoff_workdir: .
-    kickoff_env:
-      BASELINE_MAX_COMMANDS: unlimited
-      BASELINE_SUBMISSION_MODE: full
-      BASELINE_WORKFLOW: general
-      BASELINE_HARD_CAP: "80"
-      BASELINE_DEADLINE_S: "1500"
-      BASELINE_MAX_TOKENS: "65536"
-      BASELINE_EXTRA_BODY: '{"thinking": {"type": "enabled", "clear_thinking": false}}'
-    install_script: null
-    agent_version: null
   - name: baseline_b0_full
     kickoff_command: python -m clients.baseline.driver
     kickoff_workdir: .
