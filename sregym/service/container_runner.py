@@ -21,6 +21,7 @@ logger = logging.getLogger("all.sregym.container_runner")
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 DEFAULT_EGRESS_PROXY_IMAGE = "mitmproxy/mitmproxy:12.2.3"
+PROXY_CERTIFICATE_TIMEOUT_S = 120
 DEFAULT_AGENT_IMAGE = (
     "ghcr.io/sregym/agent-base:sha-b97d6810e994bb7354b4bc15c6bc81cb66e816b9"
     "@sha256:92e8b52af763c6e165144d314ec25b1ad3ba0e0f1b0a28ffa4a1760e92ec6b61"
@@ -412,7 +413,10 @@ class ContainerRunner:
             raise RuntimeError("Filtered egress proxy is not initialized")
 
         proxy_ca = self._egress_tmp_dir / "mitmproxy-ca-cert.pem"
-        deadline = time.monotonic() + 15
+        # mitmproxy generates its CA on first start; on a loaded Docker Desktop host
+        # that takes upwards of 15 seconds, so wait generously. A proxy that dies
+        # still fails immediately through the liveness check below.
+        deadline = time.monotonic() + PROXY_CERTIFICATE_TIMEOUT_S
         while time.monotonic() < deadline:
             copied = subprocess.run(
                 [
