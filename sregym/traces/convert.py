@@ -134,6 +134,9 @@ def _find_session_file(run_dir: Path, tool: str) -> Path | None:
     if tool == "opencode":
         candidates = sorted((run_dir / "sessions").rglob("session-*.json"))
         return candidates[0] if candidates else None
+    if tool.startswith("baseline"):  # every baseline arm writes the same transcript
+        path = run_dir / "baseline_transcript.jsonl"
+        return path if path.is_file() else None
     if tool == "stratus":
         candidates = sorted(run_dir.glob("*_stratus_agent_trajectory.jsonl"))
         return max(candidates, key=lambda path: (path.name, path.stat().st_mtime)) if candidates else None
