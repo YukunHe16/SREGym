@@ -209,3 +209,20 @@ def test_reply_as_message():
 )
 def test_is_rate_limit(text, expected):
     assert backends.is_rate_limit(Exception(text)) is expected
+
+
+def test_a_reply_that_arrives_only_as_reasoning_is_used_as_the_content(tmp_path, monkeypatch):
+    backend = ApiBackend("openai/deepseek-flash", "high", env={**ENV, "BASELINE_API_STREAM": "0"})
+    only_reasoning = response("", (), reasoning="THOUGHT\n\n```bash\nkubectl get pods\n```")
+    monkeypatch.setattr(litellm, "completion", lambda **kwargs: only_reasoning)
+    reply = backend.complete([{"role": "user", "content": "go"}], [], step_dir=tmp_path / "r1")
+    assert reply.error is None and reply.content_from_reasoning
+    assert "kubectl get pods" in reply.content
+    assert "reasoning_content" not in reply.as_message(pass_reasoning=True)
+
+
+def test_an_empty_reply_truncated_at_max_tokens_stays_an_error(tmp_path, monkeypatch):
+    backend = ApiBackend("openai/deepseek-flash", "high", env={**ENV, "BASELINE_API_STREAM": "0"})
+    monkeypatch.setattr(litellm, "completion", lambda **kwargs: response("", (), reasoning="still thinking", finish="length"))
+    reply = backend.complete([{"role": "user", "content": "go"}], [], step_dir=tmp_path / "r2")
+    assert reply.error is not None and "max_tokens" in reply.error and not reply.content_from_reasoning

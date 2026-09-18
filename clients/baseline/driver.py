@@ -581,6 +581,7 @@ def run_stage_mini(
                 "usage": reply.usage,
                 "finish_reason": reply.finish_reason,
                 "content": (reply.content or "")[:20000],
+                "content_from_reasoning": reply.content_from_reasoning,
                 "action": action,
                 "n_actions": n_actions,
                 "error": reply.error,

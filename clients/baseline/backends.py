@@ -45,6 +45,7 @@ class Reply:
     finish_reason: str | None = None
     latency_s: float = 0.0
     error: str | None = None
+    content_from_reasoning: bool = False
 
     def as_message(self, *, pass_reasoning: bool) -> dict:
         """The assistant message to append to the conversation."""
@@ -54,7 +55,7 @@ class Reply:
                 {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
                 for tc in self.tool_calls
             ]
-        if pass_reasoning and self.reasoning:
+        if pass_reasoning and self.reasoning and not self.content_from_reasoning:
             message["reasoning_content"] = self.reasoning
         return message
 
@@ -234,6 +235,13 @@ class ApiBackend:
         )
         if reply.reasoning:
             (step_dir / "reasoning.txt").write_text(reply.reasoning, encoding="utf-8")
+        if not reply.content and not reply.tool_calls and reply.reasoning and reply.finish_reason != "length":
+            # Thinking models sometimes put the whole reply, action block and all, in
+            # reasoning_content and leave content empty. Read the reasoning as the reply
+            # rather than losing the step; a reasoning text with no usable action still
+            # goes through the protocol's own format handling.
+            reply.content = reply.reasoning
+            reply.content_from_reasoning = True
         if not reply.content and not reply.tool_calls:
             reply.error = "empty model reply" + (
                 f" (output truncated at max_tokens={self.max_tokens})" if reply.finish_reason == "length" else ""
