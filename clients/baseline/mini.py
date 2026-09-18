@@ -22,7 +22,12 @@ SUBMIT_MODES = ("auto", "curl", "marker")
 # marker: the driver owns the submission through the marker command; needed by budget and no_mechanism arms.
 CURL_INSTANCE_NOTE = """
 
-Note: every command is executed in a new subshell; directory or environment variable changes do not persist."""
+Note: every command is executed in a new subshell; directory or environment variable changes do not persist.
+
+Current stage: diagnosis. Submit a description of the issue you found; the empty-string submission belongs to
+the mitigation stage, which starts only after this one is graded."""
+CURL_MITIGATION_NOTE = """Current stage: mitigation. The diagnosis has been submitted and cannot be changed.
+Fix the problem, then submit as the task describes for this stage."""
 ACTION_REGEX = re.compile(r"```bash\s*\n(.*?)\n```", re.DOTALL)
 OUTPUT_LIMIT = 10_000  # mini-swe-agent's observation limit: head and tail of 5,000 characters each
 MAX_CONSECUTIVE_FORMAT_ERRORS = 3
@@ -225,6 +230,18 @@ def mitigation_text(max_commands: int | None) -> str:
             else f"\nYou may run at most {max_commands} commands in this stage; the finishing command does not count."
         )
     return MITIGATION_TEMPLATE.format(marker=MARKER, budget_line=line) + MITIGATION_WORKFLOW_TEXT
+
+
+EMPTY_SOLUTION = re.compile(r'"solution"\s*:\s*(""|\'\')')
+EMPTY_DIAGNOSIS_REJECTION = (
+    "the diagnosis stage needs the text of your diagnosis, not an empty solution; the empty-string submission "
+    "belongs to the mitigation stage. Submit again with a description of the issue you found."
+)
+
+
+def submits_nothing(command: str) -> bool:
+    """A submission command whose payload carries an empty solution."""
+    return bool(EMPTY_SOLUTION.search(command))
 
 
 def parse_action(content: str) -> tuple[str | None, int]:

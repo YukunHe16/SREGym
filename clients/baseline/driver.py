@@ -638,6 +638,20 @@ def run_stage_mini(
             if format_errors >= mini.MAX_CONSECUTIVE_FORMAT_ERRORS:
                 return outcome(None, "budget_exhausted_no_submission")
             continue
+        if submit_mode == "curl" and stage == "diagnosis" and is_external_submit(action) and mini.submits_nothing(action):
+            used += 1
+            session.add_user(rejected(mini.EMPTY_DIAGNOSIS_REJECTION))
+            transcript.write(
+                {
+                    "type": "command",
+                    "stage": stage,
+                    "index": index,
+                    "command": action,
+                    "refused": "empty_diagnosis",
+                    "exit_code": 126,
+                }
+            )
+            continue
         if submit_mode == "marker" and is_external_submit(action):
             used += 1
             session.add_user(
@@ -943,9 +957,13 @@ def main():
             except TimeoutError:
                 logger.warning("Timed out waiting for the stage after diagnosis")
                 stage = None
-        if stage == "mitigation" and submit_mode != "curl":  # in curl mode the task text already covers both stages
+        if stage == "mitigation":
+            # A curl arm submits as the task describes and only needs to be told which stage it is in;
+            # the others are handed the stage's own instructions.
             session.add_user(
-                mini.mitigation_text(max_calls) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls)
+                mini.CURL_MITIGATION_NOTE
+                if submit_mode == "curl"
+                else (mini.mitigation_text(max_calls) if PROTOCOL == "mini" else protocol.stage_change_turn(max_calls))
             )
     else:
         logger.info("Benchmark starts at mitigation; skipping diagnosis")

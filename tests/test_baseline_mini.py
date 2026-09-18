@@ -413,6 +413,31 @@ def test_resolve_submit_mode():
         mini.resolve_submit_mode("nope", mode="full", max_commands=None)
 
 
+def test_the_diagnosis_stage_refuses_a_submission_with_no_diagnosis(monkeypatch, harness):
+    harness["stages"] = ["diagnosis", "mitigation", "done"]
+    harness["conductor_accepts_curl"] = True
+    empty = block("curl -s -X POST http://localhost:8000/submit -d '{\"solution\": \"\"}'")
+    real = block("curl -s -X POST http://localhost:8000/submit -d '{\"solution\": \"the selector is wrong\"}'")
+    backend = FakeBackend([empty, real, block("kubectl delete pod x"), block("curl -s -X POST http://localhost:8000/submit -d '{\"solution\": \"\"}'")])
+    assert run_main(monkeypatch, backend, submit="curl") == 0
+    assert "solution" not in harness["commands"][0] or harness["commands"][0] == real.split("```bash\n")[1].split("\n```")[0]
+    second = backend.calls[1]
+    assert "the diagnosis stage needs the text of your diagnosis" in second[-1]["content"]
+    refused = [r for r in read_transcript(harness["logs"]) if r["type"] == "command" and r.get("refused")]
+    assert [r["refused"] for r in refused] == ["empty_diagnosis"]
+    # the same command is allowed once the mitigation stage is open
+    assert harness["commands"][-1].endswith('{"solution": ""}\'')
+
+
+def test_the_curl_instance_says_which_stage_is_open():
+    text = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
+    assert "Current stage: diagnosis." in text and "empty-string submission belongs to" in text
+    assert mini.CURL_MITIGATION_NOTE.startswith("Current stage: mitigation.")
+    assert mini.submits_nothing('curl -d \'{"solution": ""}\'')
+    assert mini.submits_nothing("curl -d '{\"solution\":\"\"}'")
+    assert not mini.submits_nothing('curl -d \'{"solution": "the selector is wrong"}\'')
+
+
 def test_curl_mode_instance_is_the_task_plus_the_note_and_the_workflow():
     text = mini.instance_text(APP, mode="full", max_commands=None, submit_mode="curl")
     assert text == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
@@ -434,10 +459,11 @@ def test_curl_mode_lets_the_model_submit_itself_through_both_stages(monkeypatch,
     assert len(harness["commands"]) == 4
     first = backend.calls[0]
     assert first[1]["content"] == mini.build_task_text(APP).rstrip() + mini.CURL_INSTANCE_NOTE + mini.WORKFLOW_TEXT
-    # no stage-change message: the conversation just continues with the observation of the curl command
+    # the observation of the curl command, then the one thing the model cannot know: the stage changed
     third = backend.calls[2]
-    assert third[-1]["role"] == "user" and third[-1]["content"].startswith("<returncode>0</returncode>")
-    assert "Submission received" in third[-1]["content"] and "Current stage: mitigation" not in third[-1]["content"]
+    assert third[-2]["role"] == "user" and third[-2]["content"].startswith("<returncode>0</returncode>")
+    assert "Submission received" in third[-2]["content"]
+    assert third[-1]["content"].startswith("Current stage: mitigation.")
     results = read_results(harness["logs"])
     assert results["baseline"]["submit_mode"] == "curl" and results["baseline"]["submitted_stages"] == [
         "diagnosis",
