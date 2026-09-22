@@ -22,7 +22,7 @@
 - 使用现有 Codex 订阅登录供 agent 和 judge 使用，不引入 OpenAI API 计费。父控制器通过 `--prompt-key` 无回显读取一次 Jev key，仅保留于内存，并只传给 Jev 那次 `main.py` 的宿主进程环境。固定模型组环境中没有 Jev key。
 - 控制器采用环境白名单，移除 `OPENAI`、`AGENT`、`JUDGE`、Anthropic 等 API key/base 配置以及继承的 judge bridge URL。凭据不进入命令行、manifest、冻结配置或控制器输出；主进程合并日志额外对 Jev key 脱敏。现有原生订阅认证仍由 SREGym 的授权挂载处理。
 - 明确使用 `/Users/yukun/Documents/ChatGPT/research/output/sregym-lite-local-20260916/kubeconfig`。Python 复用 `/Users/yukun/Documents/SREGym-lite-local/.venv/bin/python`，不修改原仓库或该环境的依赖。
-- 四组都使用 `--force-build`，复用 Docker 缓存并构建同一 `sregym-agent-base:latest` 标签。原因是每个新进程默认会选择已发布镜像 digest，仅首组 force-build 会导致后续组回到旧镜像。每次记录实际镜像 ID，不把相同标签当作相同镜像字节的证据。
+- 四组都使用 `--force-build`，复用 Docker 缓存并构建同一 `sregym-agent-base:latest` 标签。原因是每个新进程默认会选择已发布镜像 digest，仅首组 force-build 会导致后续组回到旧镜像。每次保存 OCI index ID，同时比较配置 digest 与非 attestation 的 runtime manifest digest；构建证明变化不等于可执行镜像内容变化。
 - 记录工作树 commit、分支、修改状态、应用子模块 commit/状态、Python 与包版本、Docker 信息、Kubernetes context 和节点资源，以及运行源代码和配置 hash/快照。每组启动前检查冻结代码是否变化。
 
 ## 结果保存与停止条件
@@ -31,6 +31,7 @@
 - `main.py` 原生结果目录只有分钟精度。控制器拒绝在已有这种目录的情况下启动；每组主进程完整退出后，将该次新目录移动到 `<pilot>/<arm>/benchmark-results/`，再运行下一组，避免同一分钟覆盖。CSV 链接和原路径记录在组结果中。
 - 第一组 Jev 同时验证路由、执行、判分和清理。main 非零退出、部署失败、缺少完整阶段结果、oracle 异常、环境或 harness 类错误、路由失败、归档失败或清理不确定时停止后续组，保留已有证据，不静默替换模型或重试。
 - 一次完整诊断或修复判为 `success=False`，只要有完整判分且没有评估器错误，就作为有效模型结果继续，不将普通错误答案归类为基础设施失败。未完成任务单独记录，不能伪装成已判分的零分。
+- 容器清理检查仅统计 SREGym 与评测代理命名前缀的新容器；其他桌面任务的 Docker 容器不归本实验管理。
 - 900 秒限制只约束 main 中的 agent 阶段，部署、镜像构建、judge 和清理有各自耗时。父控制器记录完整 main wall time；比较时还应使用 phase ledger 区分路由、agent、judge、部署和清理，不把初始镜像构建开销解释为模型速度。
 - Codex 订阅用量与逐任务美元账单分开。记录可取得的 token/cache 计数；未知用量保持未知。Jev 费用依其返回的真实输入 token 估算。Judge/preflight 消耗也应单列，不能只统计执行模型而声称总成本。
 
@@ -43,4 +44,6 @@ cd /Users/yukun/Documents/SREGym-jev-routing
 /Users/yukun/Documents/SREGym-lite-local/.venv/bin/python scripts/run_jev_pilot.py --prompt-key
 ```
 
-这条命令会实际部署任务并调用模型；本协议与脚本的交付本身不代表已经执行或通过该试跑。
+这条命令会实际部署任务并调用模型。
+
+首批 `jev-pilot-20260922T031520.700332Z` 已完成，原冻结协议与 controller 快照保存在该批次 `configfreeze/`。上述镜像内容比较和容器范围修正是在该批四组结束、输入审计通过后加入的后续运行修复；没有重跑任何模型或改变评分。该批的两个元数据误报、继续执行及清理复核均保留原记录，详见 [RESULTS.zh.md](RESULTS.zh.md)。

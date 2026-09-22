@@ -91,13 +91,34 @@ def minute_directories():
 
 
 def container_ids(env):
-    result = capture(["docker", "ps", "--format", "{{.ID}}"], env)
-    return set(result["stdout"].splitlines())
+    result = capture(["docker", "ps", "--format", "{{json .}}"], env)
+    containers = [json.loads(line) for line in result["stdout"].splitlines()]
+    # Other desktop tasks can run unrelated Docker containers concurrently.
+    # Do not classify those as leaked benchmark resources or stop them.
+    return {row["ID"] for row in containers
+            if row["Names"].startswith(("sregym-", "evaluation-egress-proxy-"))}
 
 
 def image_identity(env):
     result = capture(["docker", "image", "inspect", IMAGE_TAG, "--format", "{{json .Id}}"], env, required=False)
     return json.loads(result["stdout"]) if result["returncode"] == 0 else None
+
+
+def build_digests(log_path):
+    """Keep build attestation identity separate from runtime filesystem bytes."""
+    text = Path(log_path).read_text(errors="replace")
+    result = {}
+    for name, label in (("config", "config"), ("runtime_manifest", "manifest"), ("index", "manifest list")):
+        values = re.findall(r"exporting " + label + r" (sha256:[0-9a-f]{64})(?=\s|$)", text)
+        if len(values) != 1:
+            raise ValueError(f"Expected exactly one {name} digest in build output")
+        result[name] = values[0]
+    result["attestations"] = re.findall(r"exporting attestation manifest (sha256:[0-9a-f]{64})(?=\s|$)", text)
+    return result
+
+
+def runtime_identity(digests):
+    return digests["config"], digests["runtime_manifest"]
 
 
 def freeze_sources(batch):
@@ -249,6 +270,7 @@ def run_pilot():
                 child_env.pop("TYPESAFE_API_KEY", None)
                 summary.update(returncode=code, main_wall_seconds=elapsed, interrupted=interrupted,
                                finished_at=datetime.now(timezone.utc).isoformat(), image_id=image_identity(env))
+                summary["build_digests"] = build_digests(arm_dir / "stdout.log")
                 # main.py is fully exited before moving its minute-resolution
                 # root; the next arm can safely reuse even the same minute.
                 new_results = sorted(minute_directories())
@@ -276,10 +298,10 @@ def run_pilot():
                     summary.update(status="stopped_cleanup_uncertain", stop_reasons=["new_containers_still_running"])
                 if interrupted:
                     summary.update(status="stopped_interrupted", stop_reasons=["user_interrupt"])
-                if summary["image_id"] is None:
+                if summary["image_id"] is None or summary["image_id"] != summary["build_digests"]["index"]:
                     summary.update(status="stopped_infrastructure", stop_reasons=["local_image_identity_unavailable"])
-                elif manifest["arms"] and summary["image_id"] != manifest["arms"][0].get("image_id"):
-                    summary.update(status="stopped_infrastructure", stop_reasons=["local_image_identity_changed_between_arms"])
+                elif manifest["arms"] and runtime_identity(summary["build_digests"]) != runtime_identity(manifest["arms"][0]["build_digests"]):
+                    summary.update(status="stopped_infrastructure", stop_reasons=["runtime_image_identity_changed_between_arms"])
             except Exception as exc:
                 summary.update(status="stopped_controller_error", error_type=type(exc).__name__,
                                error=str(exc).replace(key, "[REDACTED]"))
@@ -293,6 +315,13 @@ def run_pilot():
         manifest["status"] = "completed"
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         save_json(batch / "manifest.json", manifest)
+        save_json(batch / "completion.json", {
+            "comparison_complete": True, "status": "completed", "original_results_rewritten": False,
+            "execution_order": order,
+            "arms": [{"arm": row["arm"], "original_result": row, "resolved_status": row["status"],
+                      "resolved_metadata_flags": [], "build_digests": row["build_digests"]}
+                     for row in manifest["arms"]],
+        })
         print(f"Four-arm pilot completed: {batch}", flush=True)
         return 0
 

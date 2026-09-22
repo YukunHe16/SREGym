@@ -320,6 +320,10 @@ See the full list of supported providers and model strings in the [LiteLLM docs]
 
 </details>
 
+## Jev routing pilot
+
+This worktree adds optional host-side routing for the Codex agent with `--model-router jev`, using sourced OpenAI descriptions of GPT-5.6 Luna, Terra, and Sol. The judge stays fixed and routing is disabled by default. A complete four-arm subscription pilot, its limitations, and reproduction instructions are recorded in [the experiment report](docs/jev-routing/RESULTS.zh.md).
+
 ## Cite This
 If our work is useful for you, please cite it:
 
