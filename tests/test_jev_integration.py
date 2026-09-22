@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from sregym.phases import PhaseLedger, read_ledger
+from sregym.routing import context as routing_context
 from sregym.routing import jev
 
 
@@ -37,7 +38,8 @@ def configuration(**overrides):
 
 
 def decision(model="gpt-5.6-luna"):
-    return {"selected_model": model, "confidence": 0.8, "probabilities": {"luna": 0.8, "sol": 0.2},
+    return {"selected_model": model, "confidence": 0.8,
+            "probabilities": {"luna": 0.8, "terra": 0.1, "sol": 0.1},
             "route_latency_seconds": 0.15, "usage": {"input_tokens": 100, "output_tokens": 20},
             "estimated_cost_usd": 0.0000042}
 
@@ -175,6 +177,9 @@ def driver(benchmark, monkeypatch, tmp_path):
     monkeypatch.setattr(benchmark, "list_agents", lambda **_kwargs: {"codex": {}})
     monkeypatch.setattr(benchmark, "get_agent", lambda *_args, **_kwargs: SimpleNamespace(name="codex"))
     monkeypatch.setattr(benchmark.trace_postprocess, "write_trajectory", lambda _path: None)
+    monkeypatch.setattr(routing_context, "collect_initial_observation", Mock(return_value={
+        "schema_version": 1, "collection_point": "test", "resources": [], "events": [], "log_signals": [],
+    }))
     conductor = FakeConductor(benchmark)
     captured_models = []
 
@@ -207,13 +212,16 @@ def test_routes_each_attempt_with_public_fields_and_restores_fixed_judge(benchma
     assert route.call_count == 2
     for attempt, (call, row) in enumerate(zip(route.call_args_list, results[0]["codex"]), start=1):
         assert call.args == ({"app_name": "public-app", "namespace": "public-namespace", "descriptions": "Public description"},)
+        assert call.kwargs["initial_observation"]["schema_version"] == 1
         output_dir = call.kwargs["output_dir"]
         assert output_dir == Path("results/test-batch/codex/private_fault_id") / f"routing_attempt{attempt}"
         assert not output_dir.resolve().is_relative_to((tmp_path / ".runtime").resolve())
         assert row["routing_model"] == decisions[attempt - 1]["selected_model"]
         assert row["routing_confidence"] == 0.8
         assert row["routing_latency_seconds"] == 0.15
+        assert row["routing_context_seconds"] >= 0
         assert row["routing_estimated_cost_usd"] == 0.0000042
+        assert json.loads((output_dir / "initial_observation.json").read_text()) == call.kwargs["initial_observation"]
         ledger = read_ledger(output_dir.parent / f"phases_attempt{attempt}.jsonl")
         assert ledger[0]["model"] == "configured-model"
         selected = next(entry for entry in ledger if entry["phase"] == "model_routing" and entry["event"] == "end")

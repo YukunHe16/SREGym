@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import csv
 import importlib
+import json
 import logging
 import os
 import sys
@@ -213,8 +214,9 @@ def _configure_model_environment(args) -> tuple[str, str]:
 
 
 def _route_agent_model(conductor: Conductor, run: RunArtifacts) -> dict:
-    """Route once using only the same application fields exposed by /get_app."""
+    """Route once from public app fields and fixed read-only agent-visible evidence."""
     from sregym.routing.jev import route_app
+    from sregym.routing.context import collect_initial_observation
 
     ledger = getattr(conductor, "phases", None)
     configured_model = os.environ.get("AGENT_MODEL_ID")
@@ -224,9 +226,21 @@ def _route_agent_model(conductor: Conductor, run: RunArtifacts) -> dict:
         app = conductor.app
         # Never pass the conductor, problem ID, fault, oracle, or previous results.
         app_info = {"app_name": app.app_name, "namespace": app.namespace, "descriptions": str(app.description)}
+        output_dir = run.final_dir.parent / f"routing_attempt{run.attempt}"
+        context_started = time.monotonic()
+        observation = collect_initial_observation(app.namespace, conductor.get_agent_kubeconfig_path())
+        context_seconds = time.monotonic() - context_started
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "initial_observation.json").write_text(
+            json.dumps(observation, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        )
         # Only active_dir is mounted into the agent container. Keep router
         # requests and decisions beside final_dir, outside that opaque tree.
-        routing = route_app(app_info, output_dir=run.final_dir.parent / f"routing_attempt{run.attempt}")
+        routing = route_app(app_info, output_dir=output_dir, initial_observation=observation)
+        routing["context_collection_seconds"] = context_seconds
+        routing["context_schema_version"] = observation["schema_version"]
+        routing_path = output_dir / "routing.json"
+        routing_path.write_text(json.dumps(routing, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
     except Exception as exc:
         if ledger is not None:
             ledger.record(
@@ -239,6 +253,7 @@ def _route_agent_model(conductor: Conductor, run: RunArtifacts) -> dict:
         routing_model=routing["selected_model"],
         routing_confidence=routing["confidence"],
         routing_latency_seconds=routing["route_latency_seconds"],
+        routing_context_seconds=routing["context_collection_seconds"],
         routing_estimated_cost_usd=routing["estimated_cost_usd"],
     )
     if ledger is not None:
@@ -246,6 +261,7 @@ def _route_agent_model(conductor: Conductor, run: RunArtifacts) -> dict:
         ledger.record(
             "model_routing", "end", outcome="ok", routing_model=routing["selected_model"],
             routing_confidence=routing["confidence"], routing_latency_seconds=routing["route_latency_seconds"],
+            routing_context_seconds=routing["context_collection_seconds"],
             routing_estimated_cost_usd=routing["estimated_cost_usd"],
         )
     return routing

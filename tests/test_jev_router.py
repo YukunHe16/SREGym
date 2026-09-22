@@ -44,6 +44,20 @@ def test_public_context_allowlist_blocks_private_benchmark_fields():
     assert "Prefer Luna" not in text
 
 
+def test_read_only_observation_is_included_without_changing_public_allowlist():
+    observation = {"schema_version": 1, "resources": [{"kind": "Pod", "name": "frontend"}]}
+    payload = jev.build_payload(dict(APP, problem_id="PRIVATE"), jev.load_profile(), observation)
+    assert payload["state"]["initial_read_only_observation"] == observation
+    assert "PRIVATE" not in json.dumps(payload)
+
+
+def test_invalid_or_oversized_observation_is_rejected():
+    with pytest.raises(jev.JevRoutingError):
+        jev.build_payload(APP, jev.load_profile(), [])
+    with pytest.raises(jev.JevRoutingError):
+        jev.build_payload(APP, jev.load_profile(), {"value": "x" * 40000})
+
+
 def test_profile_has_exactly_three_documented_candidates():
     profile = jev.load_profile()
     assert set(profile["candidates"]) == {"luna", "terra", "sol"}
