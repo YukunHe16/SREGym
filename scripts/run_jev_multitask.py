@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import fcntl
 import getpass
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,9 +18,15 @@ import subprocess
 import sys
 import time
 
-from scripts import run_jev_pilot as support
-
 ROOT = Path(__file__).resolve().parents[1]
+if __package__:
+    from . import run_jev_pilot as support
+else:
+    spec = importlib.util.spec_from_file_location("jev_pilot_support", Path(__file__).with_name("run_jev_pilot.py"))
+    support = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(support)
+
 PYTHON = support.PYTHON
 KUBECONFIG = support.KUBECONFIG
 MODELS = support.MODELS
