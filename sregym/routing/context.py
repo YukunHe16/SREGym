@@ -11,7 +11,7 @@ import time
 import urllib.parse
 
 MAX_OBSERVATION_BYTES = 30_000
-MAX_LOG_PODS = 24
+MAX_LOG_PODS = 16
 LOG_SIGNAL = re.compile(
     r"error|fail|warn|timeout|timed out|refused|auth|denied|forbidden|unhealthy|panic|unavailable|not found|connection",
     re.IGNORECASE,
@@ -31,7 +31,7 @@ def _redact_text(value: str) -> str:
         value,
     )
     value = re.sub(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b", "[REDACTED_JWT]", value)
-    return value[:600]
+    return value[:350]
 
 
 def _run(argv: list[str], *, timeout: float = 12) -> dict:
@@ -155,6 +155,32 @@ def _pod_priority(item: dict) -> tuple:
     return (ready and restarts == 0, -restarts, (item.get("metadata") or {}).get("name", ""))
 
 
+def _resource_priority(item: dict) -> tuple:
+    """Put agent-visible anomalies and diagnostic routing surfaces first."""
+    kind = item.get("kind") or ""
+    metadata, status, spec = item.get("metadata") or {}, item.get("status") or {}, item.get("spec") or {}
+    name = metadata.get("name", "")
+    if kind == "Pod":
+        ready = any(value.get("type") == "Ready" and value.get("status") == "True"
+                    for value in status.get("conditions") or [])
+        restarts = sum(value.get("restartCount") or 0 for value in status.get("containerStatuses") or [])
+        return (0 if not ready or restarts else 5, -restarts, kind, name)
+    if kind in {"Deployment", "StatefulSet", "DaemonSet"}:
+        desired = spec.get("replicas")
+        ready = status.get("readyReplicas")
+        anomalous = desired is not None and ready != desired
+        return (0 if anomalous else 4, 0, kind, name)
+    if kind in {"Job", "CronJob"}:
+        active = status.get("active") or 0
+        failed = status.get("failed") or 0
+        return (1 if active or failed or kind == "CronJob" else 3, -active - failed, kind, name)
+    if kind in {"Service", "EndpointSlice", "NetworkPolicy"}:
+        return (2, 0, kind, name)
+    if kind == "PersistentVolumeClaim":
+        return (2 if status.get("phase") != "Bound" else 3, 0, kind, name)
+    return (6, 0, kind, name)
+
+
 def _log_signals(kubectl: str, kubeconfig: Path, namespace: str, pods: list[dict]) -> list[dict]:
     names = [(item.get("metadata") or {}).get("name") for item in sorted(pods, key=_pod_priority)]
     names = [name for name in names if name][:MAX_LOG_PODS]
@@ -168,18 +194,29 @@ def _log_signals(kubectl: str, kubeconfig: Path, namespace: str, pods: list[dict
         return {"pod": name, "returncode": record["returncode"], "signals": signals[-12:],
                 "stderr": record["stderr"], "wall_seconds": record["wall_seconds"]}
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        return [value for value in pool.map(collect, names) if value is not None]
+        return [value for value in pool.map(collect, names) if value is not None][:10]
 
 
 def _bounded(observation: dict) -> dict:
     observation["truncated"] = {"log_records": 0, "events": 0, "resources": 0}
-    def size():
-        return len(json.dumps(observation, ensure_ascii=False, separators=(",", ":")).encode())
-    for name in ("log_signals", "events", "resources"):
-        while observation[name] and size() > MAX_OBSERVATION_BYTES:
-            observation[name].pop()
+    def encoded(value):
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+    for name, budget in (("resources", 18_000), ("events", 5_000), ("log_signals", 5_000)):
+        while observation[name] and encoded(observation[name]) > budget:
+            # Resources are priority-sorted; events are chronological. Remove
+            # low-priority resources and oldest events, but later log records.
+            observation[name].pop(0 if name == "events" else -1)
             observation["truncated"][{"log_signals": "log_records"}.get(name, name)] += 1
-    if size() > MAX_OBSERVATION_BYTES:
+    while encoded(observation) > MAX_OBSERVATION_BYTES and observation["resources"]:
+        observation["resources"].pop()
+        observation["truncated"]["resources"] += 1
+    while encoded(observation) > MAX_OBSERVATION_BYTES and observation["events"]:
+        observation["events"].pop(0)
+        observation["truncated"]["events"] += 1
+    while encoded(observation) > MAX_OBSERVATION_BYTES and observation["log_signals"]:
+        observation["log_signals"].pop()
+        observation["truncated"]["log_records"] += 1
+    if encoded(observation) > MAX_OBSERVATION_BYTES:
         raise ObservationError("initial observation exceeds the bounded routing context")
     return observation
 
@@ -210,8 +247,11 @@ def collect_initial_observation(namespace: str, kubeconfig: str | Path, *, kubec
             raise ValueError
     except (ValueError, TypeError):
         raise ObservationError("filtered resource snapshot returned invalid JSON") from None
+    warning_events = [item for item in event_items if item.get("type") == "Warning"]
+    normal_events = [item for item in event_items if item.get("type") != "Warning"]
+    selected_events = [*warning_events[-30:], *normal_events[-10:]]
     event_summary = []
-    for item in event_items[-60:]:
+    for item in selected_events:
         involved = item.get("involvedObject") or {}
         event_summary.append({
             "type": item.get("type"), "reason": item.get("reason"), "message": _redact_text(item.get("message") or ""),
@@ -225,7 +265,7 @@ def collect_initial_observation(namespace: str, kubeconfig: str | Path, *, kubec
         "namespace": namespace, "resource_query": f"kubectl get {kinds} -n <application namespace> -o json",
         "resource_wall_seconds": resources["wall_seconds"], "event_query": "kubectl get events -n <application namespace> -o json",
         "event_returncode": events["returncode"], "event_wall_seconds": events["wall_seconds"],
-        "resources": [_resource(item) for item in items], "events": event_summary,
+        "resources": [_resource(item) for item in sorted(items, key=_resource_priority)], "events": event_summary,
         "log_signals": _log_signals(kubectl, kubeconfig, namespace, pods),
     }
     return _bounded(observation)

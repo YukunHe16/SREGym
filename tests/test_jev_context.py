@@ -78,3 +78,20 @@ def test_bounding_drops_tail_records_but_preserves_valid_json():
     bounded = context._bounded(value)
     assert len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode()) <= context.MAX_OBSERVATION_BYTES
     assert sum(bounded["truncated"].values()) > 0
+
+
+def test_anomalous_resource_survives_bounding_ahead_of_healthy_resources():
+    healthy = [{"kind": "Pod", "metadata": {"name": f"healthy-{i}"},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}],
+                           "containerStatuses": [{"restartCount": 0}]},
+                "spec": {"containers": [{"name": "app", "image": "image", "args": ["x" * 1000]}]}}
+               for i in range(50)]
+    faulty = {"kind": "Pod", "metadata": {"name": "faulty"},
+              "status": {"conditions": [{"type": "Ready", "status": "False"}],
+                         "containerStatuses": [{"restartCount": 2}]},
+              "spec": {"containers": [{"name": "app", "readinessProbe": {"httpGet": {"path": "/bad"}}}]}}
+    resources = [_resource for _resource in sorted([*healthy, faulty], key=context._resource_priority)]
+    value = context._bounded({"resources": [context._resource(item) for item in resources],
+                              "events": [], "log_signals": []})
+    assert value["resources"][0]["name"] == "faulty"
+    assert any(item["name"] == "faulty" for item in value["resources"])
