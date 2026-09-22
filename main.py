@@ -164,6 +164,19 @@ def _normalize_opencode_local_model_for_litellm(model: str) -> str:
 
 
 def _configure_model_environment(args) -> tuple[str, str]:
+    model_router = getattr(args, "model_router", "none")
+    if model_router not in {"none", "jev"}:
+        raise ValueError("--model-router must be none or jev")
+    if model_router == "jev":
+        if args.agent != "codex" or getattr(args, "use_external_harness", False):
+            raise ValueError("--model-router jev requires --agent codex without --use-external-harness")
+        if not getattr(args, "judge_model", None):
+            raise ValueError("--model-router jev requires an explicit --judge-model")
+        from sregym.routing.jev import validate_configuration
+
+        # Validate locally before changing model settings or starting deployment.
+        validate_configuration()
+
     agent_model = args.model
     raw_judge_model = args.judge_model or args.model
     reasoning_effort = getattr(args, "reasoning_effort", None)
@@ -199,6 +212,58 @@ def _configure_model_environment(args) -> tuple[str, str]:
     return agent_model, judge_model
 
 
+def _route_agent_model(conductor: Conductor, run: RunArtifacts) -> dict:
+    """Route once using only the same application fields exposed by /get_app."""
+    from sregym.routing.jev import route_app
+
+    ledger = getattr(conductor, "phases", None)
+    configured_model = os.environ.get("AGENT_MODEL_ID")
+    if ledger is not None:
+        ledger.record("model_routing", "start", router="jev", configured_model=configured_model)
+    try:
+        app = conductor.app
+        # Never pass the conductor, problem ID, fault, oracle, or previous results.
+        app_info = {"app_name": app.app_name, "namespace": app.namespace, "descriptions": str(app.description)}
+        # Only active_dir is mounted into the agent container. Keep router
+        # requests and decisions beside final_dir, outside that opaque tree.
+        routing = route_app(app_info, output_dir=run.final_dir.parent / f"routing_attempt{run.attempt}")
+    except Exception as exc:
+        if ledger is not None:
+            ledger.record(
+                "model_routing", "end", outcome="error", router="jev",
+                error_code=getattr(exc, "code", type(exc).__name__),
+            )
+        raise
+    conductor.results.update(
+        model_router="jev",
+        routing_model=routing["selected_model"],
+        routing_confidence=routing["confidence"],
+        routing_latency_seconds=routing["route_latency_seconds"],
+        routing_estimated_cost_usd=routing["estimated_cost_usd"],
+    )
+    if ledger is not None:
+        ledger.context.update(model=routing["selected_model"], model_router="jev", configured_model=configured_model)
+        ledger.record(
+            "model_routing", "end", outcome="ok", routing_model=routing["selected_model"],
+            routing_confidence=routing["confidence"], routing_latency_seconds=routing["route_latency_seconds"],
+            routing_estimated_cost_usd=routing["estimated_cost_usd"],
+        )
+    return routing
+
+
+@contextlib.contextmanager
+def _selected_agent_model(model: str | None):
+    """Let this launch capture its selected model without changing the judge."""
+    previous_model = os.environ.get("AGENT_MODEL_ID")
+    if model is not None:
+        os.environ["AGENT_MODEL_ID"] = model
+    try:
+        yield
+    finally:
+        if model is not None:
+            _restore_env_var("AGENT_MODEL_ID", previous_model)
+
+
 @contextlib.contextmanager
 def _artifact_environment(run: RunArtifacts):
     previous = {
@@ -225,6 +290,7 @@ def driver_loop(
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
     judge_backend: str = "api",
+    model_router: str = "none",
 ):
     """
     Deploy each problem and wait for HTTP grading via POST /submit.
@@ -237,6 +303,7 @@ def driver_loop(
         use_external_harness: If True, inject fault and exit without running evaluation logic.
         n_attempts: Number of end-to-end attempts to run each problem.
         resume_csv: Path to a previous results CSV to resume from (skip completed problems).
+        model_router: Optional host-side task router; defaults to the fixed model.
     """
 
     async def driver():
@@ -511,13 +578,32 @@ def driver_loop(
                 agent_proc = None
 
                 if conductor.stage_sequence:
-                    with _artifact_environment(run):
-                        reg = get_agent(
-                            agent_to_run,
-                            path=Path(os.path.dirname(os.path.abspath(__file__))) / "agents.yaml",
-                        )
-                        if reg:
-                            agent_proc = await LAUNCHER.ensure_started(reg)
+                    routing = None
+                    if model_router == "jev":
+                        try:
+                            routing = _route_agent_model(conductor, run)
+                        except Exception as exc:
+                            # The router persists its own safe diagnostic. Do
+                            # not log exception bodies or fall back to --model.
+                            error_code = getattr(exc, "code", type(exc).__name__)
+                            conductor.results.update(
+                                model_router="jev", routing_failed=True, routing_error_code=error_code,
+                                infrastructure_failure="model_routing_failed",
+                            )
+                            conductor.record_incomplete_attempt("model_routing_failed")
+                            console.log(f"⛔ Model routing failed ({error_code}); cleaning up without starting an agent")
+                            conductor.close_submissions()
+                            await finish_problem_with_deadline("cleanup_timeout_after_model_routing_failure")
+                            abort_campaign_after_attempt = True
+                    if not abort_campaign_after_attempt:
+                        with _artifact_environment(run):
+                            reg = get_agent(
+                                agent_to_run,
+                                path=Path(os.path.dirname(os.path.abspath(__file__))) / "agents.yaml",
+                            )
+                            if reg:
+                                with _selected_agent_model(routing["selected_model"] if routing else None):
+                                    agent_proc = await LAUNCHER.ensure_started(reg)
                 else:
                     console.log("⏩ No agent stages are configured; waiting only for bounded cleanup")
                     if conductor.close_submissions():
@@ -767,6 +853,8 @@ def driver_loop(
                         )
                     elif conductor.results.get("cleanup_timed_out"):
                         abort_reason = "Benchmark cleanup did not terminate; later attempts were not started against uncertain state."
+                    elif conductor.results.get("routing_failed"):
+                        abort_reason = "Model routing failed; the deployment was cleaned up and no fallback agent was started."
                     else:
                         abort_reason = (
                             "A submission evaluator did not terminate safely. "
@@ -801,6 +889,7 @@ def _run_driver_and_shutdown(
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
     judge_backend: str = "api",
+    model_router: str = "none",
 ):
     """Run the benchmark driver, stash results, then tell the API to exit."""
     global _driver_error, _driver_results
@@ -814,6 +903,7 @@ def _run_driver_and_shutdown(
             agent_timeout=agent_timeout,
             resume_csv=resume_csv,
             judge_backend=judge_backend,
+            model_router=model_router,
         )
         _driver_results = results
     except BenchmarkCampaignAborted as exc:
@@ -863,6 +953,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
         f"🔧 Config — agent: {args.agent}, agent_model: {agent_model}, "
         f"judge_backend: {judge_backend}, judge_model: {judge_model}, "
         f"reasoning_effort: {getattr(args, 'reasoning_effort', None) or 'agent default'}, "
+        f"model_router: {getattr(args, 'model_router', 'none')}, "
         f"deployment_profile: {get_profile()}, "
         f"internet_access: {internet_policy.mode.value}, "
         f"container_hardening: {args.container_hardening}, "
@@ -946,7 +1037,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
             args.resume,
         ),
         name="driver",
-        kwargs={"judge_backend": judge_backend},
+        kwargs={"judge_backend": judge_backend, "model_router": getattr(args, "model_router", "none")},
         daemon=True,
     )
     driver_thread.start()
@@ -1052,6 +1143,12 @@ if __name__ == "__main__":
         type=str,
         default="gpt-5",
         help="LiteLLM model string (e.g. anthropic/claude-sonnet-4-6-20250627, gpt-5, gemini/gemini-2.5-pro)",
+    )
+    parser.add_argument(
+        "--model-router",
+        choices=("none", "jev"),
+        default="none",
+        help="Optional task-level model selection (jev requires Codex and an explicit --judge-model)",
     )
     parser.add_argument(
         "--judge-model",
