@@ -27,6 +27,8 @@ def test_collector_uses_filtered_snapshot_redacts_values_and_keeps_diagnostics(t
              "count": 3, "involvedObject": {"kind": "Pod", "name": "frontend"}}
 
     def fake(argv, timeout=12):
+        if "config" in argv and "view" in argv:
+            return result(argv, "https://host.docker.internal:16443")
         if "logs" in argv:
             return result(argv, "password=logsecret authentication failed\nnormal line\n")
         if "events" in argv:
@@ -43,6 +45,7 @@ def test_collector_uses_filtered_snapshot_redacts_values_and_keeps_diagnostics(t
     assert value["resources"][0]["spec"]["containers"][0]["env"][1]["value_from"]["secretKeyRef"]["name"] == "db"
     assert value["log_signals"][0]["pod"] == "frontend"
     assert str(kubeconfig) not in encoded
+    assert "host.docker.internal" not in encoded
     assert len(encoded.encode()) <= context.MAX_OBSERVATION_BYTES
 
 
@@ -56,6 +59,15 @@ def test_collector_rejects_bad_namespace_missing_kubeconfig_and_resource_failure
     monkeypatch.setattr(context, "_run", lambda argv, timeout=12: result(argv, "", 1))
     with pytest.raises(context.ObservationError):
         context.collect_initial_observation("valid", kubeconfig)
+
+
+def test_host_proxy_endpoint_translation_keeps_remote_endpoints_unchanged(tmp_path, monkeypatch):
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("filtered")
+    monkeypatch.setattr(context, "_run", lambda argv, timeout=12: result(argv, "https://host.docker.internal:16443"))
+    assert context._host_proxy_server("kubectl", kubeconfig) == "https://127.0.0.1:16443"
+    monkeypatch.setattr(context, "_run", lambda argv, timeout=12: result(argv, "https://10.0.0.1:6443"))
+    assert context._host_proxy_server("kubectl", kubeconfig) is None
 
 
 def test_bounding_drops_tail_records_but_preserves_valid_json():

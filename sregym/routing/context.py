@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import urllib.parse
 
 MAX_OBSERVATION_BYTES = 30_000
 MAX_LOG_PODS = 24
@@ -47,6 +48,26 @@ def _run(argv: list[str], *, timeout: float = 12) -> dict:
     except subprocess.TimeoutExpired:
         return {"argv": argv, "returncode": None, "stdout": "", "stderr": "timeout",
                 "wall_seconds": time.monotonic() - started}
+
+
+def _host_proxy_server(kubectl: str, kubeconfig: Path) -> str | None:
+    """Translate Docker's host alias while retaining the filtered proxy and its credentials."""
+    record = _run([kubectl, "config", "view", "--kubeconfig", str(kubeconfig), "--minify",
+                   "-o", "jsonpath={.clusters[0].cluster.server}"], timeout=5)
+    if record["returncode"] != 0:
+        raise ObservationError("could not read the filtered kubeconfig endpoint")
+    try:
+        parsed = urllib.parse.urlparse(record["stdout"].strip())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.port is None:
+            raise ValueError
+    except ValueError:
+        raise ObservationError("filtered kubeconfig has an invalid endpoint") from None
+    if parsed.hostname == "host.docker.internal":
+        return urllib.parse.urlunparse(parsed._replace(netloc=f"127.0.0.1:{parsed.port}"))
+    if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+        return record["stdout"].strip()
+    # A non-local address may be directly reachable on Linux; no override.
+    return None
 
 
 def _containers(spec: dict) -> dict:
@@ -170,7 +191,11 @@ def collect_initial_observation(namespace: str, kubeconfig: str | Path, *, kubec
     kubeconfig = Path(kubeconfig)
     if not kubeconfig.is_file():
         raise ObservationError("agent kubeconfig is unavailable")
-    base = [kubectl, "--kubeconfig", str(kubeconfig), "-n", namespace]
+    server = _host_proxy_server(kubectl, kubeconfig)
+    base = [kubectl, "--kubeconfig", str(kubeconfig)]
+    if server:
+        base.extend(["--server", server])
+    base.extend(["-n", namespace])
     kinds = "pods,deployments,statefulsets,daemonsets,services,endpointslices,networkpolicies,persistentvolumeclaims,jobs,cronjobs"
     resources = _run([*base, "get", kinds, "-o", "json", "--request-timeout=10s"], timeout=15)
     events = _run([*base, "get", "events", "-o", "json", "--request-timeout=10s"], timeout=15)
