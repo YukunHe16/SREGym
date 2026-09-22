@@ -171,8 +171,12 @@ def _resource_priority(item: dict) -> tuple:
         anomalous = desired is not None and ready != desired
         return (0 if anomalous else 4, 0, kind, name)
     if kind in {"Job", "CronJob"}:
-        active = status.get("active") or 0
-        failed = status.get("failed") or 0
+        def count(value):
+            if isinstance(value, list):
+                return len(value)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+        active = count(status.get("active"))
+        failed = count(status.get("failed"))
         return (1 if active or failed or kind == "CronJob" else 3, -active - failed, kind, name)
     if kind in {"Service", "EndpointSlice", "NetworkPolicy"}:
         return (2, 0, kind, name)

@@ -95,3 +95,11 @@ def test_anomalous_resource_survives_bounding_ahead_of_healthy_resources():
                               "events": [], "log_signals": []})
     assert value["resources"][0]["name"] == "faulty"
     assert any(item["name"] == "faulty" for item in value["resources"])
+
+
+def test_cronjob_active_object_references_and_job_counts_share_priority_shape():
+    cron = {"kind": "CronJob", "metadata": {"name": "cron"},
+            "status": {"active": [{"name": "job-a"}, {"name": "job-b"}]}}
+    job = {"kind": "Job", "metadata": {"name": "job"}, "status": {"active": 2, "failed": 1}}
+    assert context._resource_priority(cron)[:2] == (1, -2)
+    assert context._resource_priority(job)[:2] == (1, -3)
