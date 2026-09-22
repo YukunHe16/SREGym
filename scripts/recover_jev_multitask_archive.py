@@ -72,7 +72,7 @@ def _validate(batch: Path) -> tuple[dict, dict, list[dict]]:
     minute = support.minute_directories()
     if len(minute) != 1:
         raise ValueError("expected one preserved completed main result directory")
-    return manifest, old, [*first[:4], *old["new_runs"][:2]], minute[0]
+    return manifest, old, [*first[:4], *old["new_runs"][:2]], next(iter(minute))
 
 
 def _archive_completed_run(batch: Path, failed: dict, minute: Path, reference_runtime: tuple) -> dict:
@@ -228,7 +228,7 @@ def main() -> int:
         parser.error("--prompt-key requires an interactive terminal")
     try:
         return recover_and_continue(args.baseline)
-    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+    except (ValueError, TypeError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
         print(f"Archive recovery refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
