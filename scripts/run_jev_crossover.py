@@ -77,6 +77,12 @@ def parse_digests(log_path: Path) -> dict:
 
 
 def classify(task: str, returncode: int, rows: list[dict]) -> tuple[str, list[str]]:
+    if len(rows) == 1 and rows[0].get("problem_id") == task:
+        flags = [name for name in ("deploy_failed", "cleanup_failed", "cleanup_timed_out",
+                                   "artifact_finalization_failed", "routing_failed")
+                 if str(rows[0].get(name, "")).lower() in {"true", "1", "yes"}]
+        if flags:
+            return "stopped_infrastructure", flags
     if returncode == 0 and len(rows) == 1:
         row = rows[0]
         if (row.get("problem_id") == task and row.get("attempt") == "1"

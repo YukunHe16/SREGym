@@ -34,4 +34,4 @@ def test_valid_agent_timeout_is_model_outcome_and_infrastructure_error_is_not():
            "incomplete_reason": "agent_timeout", "timed_out": "True"}
     assert crossover.classify(task, 0, [row]) == ("completed_model_timeout", ["fixed_budget_agent_timeout"])
     row["routing_failed"] = "True"
-    assert crossover.classify(task, 0, [row])[0] != "completed_model_timeout"
+    assert crossover.classify(task, 1, [row]) == ("stopped_infrastructure", ["routing_failed"])

@@ -18,6 +18,7 @@ from pathlib import Path
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
+USER_AGENT = "SREGym-Jev-Router/1.0"
 MODELS = {name: f"gpt-5.6-{name}" for name in ("luna", "terra", "sol")}
 PROFILE_PATH = Path(__file__).with_name("openai_models_20260922.json")
 INPUT_PRICE_PER_MILLION = 0.042
@@ -158,6 +159,7 @@ def route_app(app_info: dict, *, output_dir: Path, initial_observation: dict | N
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    http_status = None
     try:
         key = _key()
         profile = load_profile()
@@ -166,16 +168,17 @@ def route_app(app_info: dict, *, output_dir: Path, initial_observation: dict | N
         request = urllib.request.Request(
             ENDPOINT,
             data=json.dumps(payload, ensure_ascii=False, allow_nan=False).encode(),
-            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                     "User-Agent": USER_AGENT},
             method="POST",
         )
         http_started = time.monotonic()
         try:
-            status, body = _transport(request)
+            http_status, body = _transport(request)
         except Exception:
             raise JevRoutingError("transport_error") from None
         latency = time.monotonic() - http_started
-        if not isinstance(status, int) or isinstance(status, bool) or not 200 <= status < 300:
+        if not isinstance(http_status, int) or isinstance(http_status, bool) or not 200 <= http_status < 300:
             raise JevRoutingError("http_error")
         if not isinstance(body, bytes) or len(body) > MAX_RESPONSE_BYTES:
             raise JevRoutingError("invalid_response")
@@ -218,6 +221,9 @@ def route_app(app_info: dict, *, output_dir: Path, initial_observation: dict | N
         _save(output_dir / "routing.json", result)
         return result
     except JevRoutingError as exc:
-        _save(output_dir / "error.json", {"status": "router_error", "error_code": exc.code,
-                                         "wall_seconds": time.monotonic() - started})
+        error = {"status": "router_error", "error_code": exc.code,
+                 "wall_seconds": time.monotonic() - started}
+        if exc.code == "http_error" and isinstance(http_status, int) and not isinstance(http_status, bool):
+            error["http_status"] = http_status
+        _save(output_dir / "error.json", error)
         raise

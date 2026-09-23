@@ -30,6 +30,7 @@ def test_each_model_can_be_chosen_and_full_evidence_is_saved(tmp_path, monkeypat
     call.assert_called_once()
     request = call.call_args.args[0]
     assert request.get_header("Authorization") == "Bearer " + KEY
+    assert request.get_header("User-agent") == jev.USER_AGENT
     assert json.loads(request.data) == json.loads((tmp_path / "request.json").read_text())
     assert set(json.loads(request.data)["questions"]["route"]["criteria"]) == set(jev.MODELS)
     assert KEY not in (tmp_path / "routing.json").read_text()
@@ -124,6 +125,18 @@ def test_transport_secret_is_not_logged_or_retried(tmp_path, monkeypatch):
             jev.route_app(APP, output_dir=tmp_path)
     assert KEY not in str(error.value)
     call.assert_called_once()
+    assert KEY not in (tmp_path / "error.json").read_text()
+
+
+def test_http_failure_records_only_safe_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", KEY)
+    with patch.object(jev, "_transport", return_value=(403, b"provider response")):
+        with pytest.raises(jev.JevRoutingError):
+            jev.route_app(APP, output_dir=tmp_path)
+    saved = json.loads((tmp_path / "error.json").read_text())
+    assert saved["error_code"] == "http_error"
+    assert saved["http_status"] == 403
+    assert "provider response" not in (tmp_path / "error.json").read_text()
     assert KEY not in (tmp_path / "error.json").read_text()
 
 
