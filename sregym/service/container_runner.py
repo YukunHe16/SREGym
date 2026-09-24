@@ -132,6 +132,8 @@ class ContainerRunner:
         # Anthropic
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_API_BASE",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
         # Gemini / Google
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",
@@ -206,6 +208,10 @@ class ContainerRunner:
         "CURSOR_API_KEY",
         # Claude Code
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
         # GitHub Copilot CLI
         "COPILOT_GITHUB_TOKEN",
         "COPILOT_PROVIDER_BASE_URL",
