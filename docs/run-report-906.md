@@ -174,8 +174,5 @@ and more. The folder gets `summary.csv`, one row per run, and `summary.md`.
 ## Limits
 
 - The model can be wrong. The report says how sure each part is.
-- Most accuracy numbers are for deepseek-flash. Other models are compared in [`run-report.md`](run-report.md).
 - The list of known decoys is kept by hand in `sregym/results/run_report/traps.py`. A new problem with a new decoy
   needs an entry there.
-- It expects SREGym's layout: a diagnosis stage and a mitigation stage, a ground truth with `component=`, and
-  SREGym's results table.
