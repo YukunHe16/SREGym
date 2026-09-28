@@ -4595,3 +4595,15 @@ def test_the_report_header_names_the_refusals():
     assert "4 次请求被模型自己的安全审查拒答" in line and "3 次改由 `claude-opus-5-5` 回答" in line
     assert "1 次换了模型也被拒" in line and line.endswith("</sub>")
     assert "refused by the model's own safeguards" in _made_with(source, TEXT["en"])
+
+
+def test_the_reasoning_effort_reaches_the_subscription_labellers(monkeypatch, tmp_path):
+    """--labeller-effort had reached the LiteLLM labellers only (2026-09-28): a codex: or claudecode: model was asked
+    at its default, and a cache written at an effort could not be replayed by naming it."""
+    from sregym.results.run_report.labeller import make_labellers
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
+    codex = make_labellers("codex:gpt-6-sol", [], None, tmp_path, effort="high").default
+    claude = make_labellers("claudecode:claude-sonnet-5-5", [], None, tmp_path, effort="medium").default
+    assert codex.name == "codex:gpt-6-sol effort=high"
+    assert claude.name == "claudecode:claude-sonnet-5-5 effort=medium"

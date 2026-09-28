@@ -832,9 +832,11 @@ def make_labellers(
     """The default labeller (``spec``) and one per ``GROUP=SPEC`` of ``for_groups``. Each labeller keeps its answers
     in a cache file of its own (label_cache.jsonl for the default one, label_cache.<spec>.jsonl for the others) and
     reads the other one of the two as well, so a model moved from some groups to all of them, or back, asks again
-    nothing it has answered in that folder; one spec serves every group that names it. The
-    reasoning effort, and ``chat_workers`` in place of ``workers``, go to the LiteLLM labellers only: Jev has no
-    effort to set, and a chat model that reasons at length on every request is the one worth more requests at once."""
+    nothing it has answered in that folder; one spec serves every group that names it. The reasoning effort goes to
+    every labeller but Jev, which has none to set (until 2026-09-28 it went to the LiteLLM ones only, and a codex: or
+    claudecode: model was asked at its default whatever --labeller-effort said). ``chat_workers`` in place of
+    ``workers`` goes to the LiteLLM labellers only: a chat model that reasons at length on every request is the one
+    worth more requests at once."""
     made: dict[str, Labeller | None] = {}
 
     def own_file(wanted: str) -> Path:
@@ -850,7 +852,7 @@ def make_labellers(
                 key_file,
                 cache,
                 (chat_workers or workers) if chat else workers,
-                effort if chat else None,
+                None if wanted.startswith("jev") else effort,  # Jev has no effort to set; every other back end takes it
                 (other,),
                 cache_only=cache_only,
                 allow_new_requests=allow_new_requests,
