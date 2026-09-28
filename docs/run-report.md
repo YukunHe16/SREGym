@@ -12,6 +12,8 @@ python -m sregym.results.run_report results/0918_1408/baseline --out /tmp/report
 
 The input directory is only read. Everything is written under `--out`.
 
+How the report answers each item of #906, in plain words with a real example: [`run-report-906.md`](run-report-906.md).
+
 ## Connecting a model
 
 The report is meant to be made with a model: without one (`--labeller none`, the default) only the rule sections are
