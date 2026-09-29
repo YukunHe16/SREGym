@@ -1,7 +1,7 @@
 """The mini-swe-agent recipe for the baseline agent.
 
 Everything the model sees is plain text: a system prompt that asks for exactly ONE ```bash
-code block per reply, the task instruction the CLI agents get, and one observation per
+code block per reply, the task instruction the Codex agent gets, and one observation per
 command (return code plus output, long outputs shortened to their head and tail). Each
 command runs in a fresh subshell. The model submits exactly as the task instruction says
 (POST /submit itself), which is the CLI agents' condition. Templates and rules follow
@@ -101,7 +101,7 @@ WRAP_UP_HOW = "Submit it to the conductor exactly as the task instruction descri
 
 
 def build_task_text(app_info: dict) -> str:
-    """The instruction every CLI agent gets, byte for byte."""
+    """The instruction the Codex agent gets, byte for byte."""
     from clients.codex.driver import build_instruction
 
     return build_instruction(app_info)

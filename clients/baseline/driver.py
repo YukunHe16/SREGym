@@ -1,7 +1,7 @@
 """
 Baseline agent driver for SREGym.
 
-The mini-swe-agent recipe: the model gets the same task instruction as the CLI agents,
+The mini-swe-agent recipe: the model gets the same task instruction as the Codex agent,
 replies with exactly one ```bash block per turn, each command runs in a fresh subshell, and
 the observation is the return code plus the output. The model submits exactly as the task
 instruction says (POST /submit with curl), and a stage ends on the conductor's receipt.
