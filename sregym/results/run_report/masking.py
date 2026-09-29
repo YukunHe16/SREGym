@@ -21,6 +21,9 @@ CREDENTIALS = re.compile(
     re.DOTALL,
 )
 BEARER = re.compile(r"(?i)(\bauthorization:\s*bearer\s+)[\w.~+/=-]{16,}")
+# a token given by name, with no prefix of its own: kubectl's --token, a kubeconfig's ``token:``, a JSON "token" or
+# "access_token". SREGym's own kube proxy hands the agent such a token (``secrets.token_urlsafe``).
+TOKEN_FIELD = re.compile(r"""(?i)((?:--token(?:=|\s+)|(?<![a-z])token["']?\s*[:=]\s*)["']?)[\w.~+/-]{16,}=*""")
 MASK = "[credential masked]"
 # base64 of a PEM private key or of a JWT, as Kubernetes Secret data holds them, on one line or wrapped at 64 or 76
 # columns (``base64``, ``openssl base64``): the whole block is taken, and decoded to tell a key from a certificate
@@ -42,6 +45,7 @@ def _encoded(match: re.Match) -> str:
 
 def masked(text: str) -> str:
     text = BEARER.sub(lambda m: m.group(1) + MASK, CREDENTIALS.sub(MASK, text))
+    text = TOKEN_FIELD.sub(lambda m: m.group(1) + MASK, text)
     return ENCODED.sub(_encoded, text)
 
 

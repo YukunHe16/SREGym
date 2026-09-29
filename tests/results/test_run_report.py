@@ -4335,9 +4335,16 @@ def test_credentials_of_more_shapes_are_masked():
         "AIza" + "A" * 35,
         "hf_" + "a" * 34,
         "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123",
+        'kubectl get pods --token="abcdefghijklmnopqrstuvwxyz-0123" --insecure-skip-tls-verify',
+        "kubectl get pods --token abcdefghijklmnopqrstuvwxyz_0123",
+        "users:\n- name: agent\n  user:\n    token: abcdefghijklmnopqrstuvwxyz-0123\n",
+        '{"access_token": "abcdefghijklmnopqrstuvwxyz.0123"}',
     ):
         shown = masked(secret)
         assert MASK in shown and body[:20] not in shown and "abcdefghijklmnopqrstuvwxyz" not in shown, secret[:40]
+    # short values and words that only mention tokens are left alone
+    for plain in ("token: <none>", "tokens: 1234", "max_tokens=65536", "--token-file /var/run/token"):
+        assert masked(plain) == plain, plain
     cert = "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIEbWFrZTANBgkqhkiG9w0BAQsFADBsMRAwDgYDVQQGEwdV\n-----END CERTIFICATE-----\n"
     assert masked(cert) == cert and masked(base64.b64encode(cert.encode()).decode()) == base64.b64encode(cert.encode()).decode()
 
