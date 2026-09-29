@@ -118,8 +118,9 @@ Important:
 Note: every command is executed in a new subshell; directory or environment variable changes do not persist.
 ```
 
-**Five rules on how to work.** They say how to investigate, never where to look. They name
-no kind of Kubernetes object, no kind of fault and nothing the judge scores.
+**Five rules on how to work.** They take the place of mini-swe-agent's six steps for fixing
+code. They say how to investigate, never where to look. They name no kind of Kubernetes
+object, no kind of fault and nothing the judge scores.
 
 ```
 ## How to work
