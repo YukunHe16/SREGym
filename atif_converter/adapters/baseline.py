@@ -7,6 +7,7 @@ bespoke, built from the transcript the driver writes.
 Input: ``baseline_transcript.jsonl``, written by ``clients/baseline/driver.py``. NDJSON:
 
     {"type":"meta", "backend":..., "model":..., "protocol":"mini", "submit_mode":..., ...}
+    {"type":"prompt", "messages":[{"role":"system", "content":...}, {"role":"user", "content":...}]}
     {"type":"model_call", "stage":"diagnosis", "call":1, "content":..., "action":...,
      "usage":{...}, "finish_reason":..., "latency_s":..., "error":null}
     {"type":"command", "stage":"diagnosis", "index":1, "command":..., "exit_code":0,
@@ -21,6 +22,9 @@ Key facts (confirmed against real runs):
   ``model_call`` and the ``command`` that follows it belong to the same step: the command becomes
   that step's single tool call and its output the step's observation. A reply the protocol could
   not use (no action, two actions, a provider error) is a step with no tool call.
+- **The prompt** (the system prompt and the first message) becomes the first steps, with
+  ``source`` system and user, as the other agents' trajectories begin. Transcripts written
+  before the driver recorded it have no ``prompt`` record and start with the first reply.
 - **Reasoning** is written per step to ``steps/step_NN/reasoning.txt`` rather than into the
   transcript, so it is picked up from the run directory when one is given.
 - **Stages** are sequential phases (``diagnosis``, ``mitigation``). They are concatenated into one
@@ -166,7 +170,17 @@ def convert_records(
 
     for record in records:
         kind = record.get("type")
-        if kind == "model_call":
+        if kind == "prompt":
+            for message in record.get("messages") or []:
+                steps.append(
+                    Step(
+                        step_id=len(steps) + 1,
+                        timestamp=record.get("ts"),
+                        source="system" if message.get("role") == "system" else "user",
+                        message=_stringify(message.get("content")),
+                    )
+                )
+        elif kind == "model_call":
             flush(None)  # a reply with no usable action still had its turn
             pending = record
         elif kind == "command":
@@ -177,7 +191,7 @@ def convert_records(
                 stages.append({"stage": record.get("stage"), "reason": record.get("reason"), "steps": len(steps)})
     flush(None)
 
-    if not steps:
+    if not any(step.source == "agent" for step in steps):
         raise ConversionFailedError("baseline transcript holds no model calls")
 
     submissions = [

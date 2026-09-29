@@ -439,6 +439,7 @@ def main():
     session = Session(pass_reasoning=SESSION_REASONING)
     # The task text covers both stages, so the mitigation stage gets no turn of its own.
     session.open(backend.system_message(mini.system_text()), mini.instance_text(app_info))
+    transcript.write({"type": "prompt", "messages": [dict(m) for m in session.messages]})
 
     def run(stage_name: str, **kwargs) -> StageOutcome:
         return run_stage(

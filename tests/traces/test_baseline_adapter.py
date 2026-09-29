@@ -4,6 +4,7 @@ Asserts the adapter against a REAL baseline run fixture (mini protocol, curl sub
 both stages), reduced to the two files the adapter reads.
 """
 
+import json
 from pathlib import Path
 
 from atif_converter import Trajectory, convert, detect_agent
@@ -78,7 +79,6 @@ def test_reasoning_and_token_metrics_are_carried_over():
 
 def test_transcript_without_a_run_directory_still_converts():
     records = [line for line in TRANSCRIPT.read_text(encoding="utf-8").splitlines() if line.strip()]
-    import json
 
     traj = baseline.convert_records([json.loads(line) for line in records])
     assert len(traj.steps) == EXPECTED_STEPS
@@ -89,3 +89,21 @@ def test_the_format_is_detected_and_dispatched():
     assert detect_agent(TRANSCRIPT) == "baseline"
     assert convert(TRANSCRIPT).agent.name == "baseline"
     assert convert(TRANSCRIPT, agent="baseline").agent.name == "baseline"
+
+
+def test_a_recorded_prompt_becomes_the_first_steps(tmp_path):
+    lines = TRANSCRIPT.read_text().splitlines()
+    prompt = {
+        "ts": "2026-09-29T00:00:00+00:00",
+        "type": "prompt",
+        "messages": [{"role": "system", "content": "SYSTEM TEXT"}, {"role": "user", "content": "TASK TEXT"}],
+    }
+
+    with_prompt = tmp_path / "baseline_transcript.jsonl"
+    with_prompt.write_text("\n".join([lines[0], json.dumps(prompt), *lines[1:]]) + "\n")
+    traj = baseline.convert_file(with_prompt)
+    assert [(s.source, s.message) for s in traj.steps[:2]] == [("system", "SYSTEM TEXT"), ("user", "TASK TEXT")]
+    assert [step.step_id for step in traj.steps] == list(range(1, EXPECTED_STEPS + 3))
+    assert all(step.source == "agent" for step in traj.steps[2:])
+    # the transcript without the record (runs made before it existed) converts as before
+    assert [s.message for s in _convert().steps] == [s.message for s in traj.steps[2:]]

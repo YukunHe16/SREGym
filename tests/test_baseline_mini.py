@@ -181,6 +181,8 @@ def test_the_model_submits_itself_through_both_stages(monkeypatch, harness):
     assert results["baseline"]["stages"]["diagnosis"]["commands_used"] == 2  # the curl counts as a command it ran
     assert results["usage_metrics"]["input_tokens"] == 400
     records = read_transcript(harness["logs"])
+    assert [r["type"] for r in records[:2]] == ["meta", "prompt"]
+    assert records[1]["messages"] == first  # the prompt as sent, kept in the transcript
     assert [r["by"] for r in records if r["type"] == "submit"] == ["command", "command"]
     assert [r["index"] for r in records if r["type"] == "command"] == [1, 2, 3, 4]
     assert [r["call"] for r in records if r["type"] == "model_call"] == [1, 2, 3, 4]

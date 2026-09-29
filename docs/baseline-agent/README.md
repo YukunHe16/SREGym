@@ -199,12 +199,18 @@ These can be changed in `agents.yaml` under `kickoff_env`: `BASELINE_HARD_CAP`,
 
 ## Files it writes
 
-In the run's log folder:
+The agent writes these in the run's log folder:
 
 | File | Contents |
 | --- | --- |
-| `baseline_transcript.jsonl` | every model call and every command, with return code, timings and output |
+| `baseline_transcript.jsonl` | the prompt, every model call and every command, with return code, timings and output |
 | `baseline_results_*.json` | usage, command counts, how each stage ended |
 | `steps/step_NN/` | the exact messages sent at each step, the reply and its reasoning |
 
-After each run SREGym also writes `trajectory.json`, the same run in ATIF.
+These take the place of a CLI agent's own logs (for Codex, `sessions/` and `codex.txt`).
+
+SREGym writes the rest, as it does for every agent: `trajectory.json` (the run in ATIF
+v1.7), `driver.log`, `driver.rc`, `<problem>_results.csv` (the judge's scores) and its own
+`sregym_*.log`. As in the other agents' trajectories, the first steps of `trajectory.json`
+are the prompt: the system prompt, then the first message. Runs made before the agent
+recorded its prompt (the ones in `lite21-qwen/`) start with the model's first reply.
