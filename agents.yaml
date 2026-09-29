@@ -113,3 +113,16 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
+
+  # Baseline agent (provider-key models through LiteLLM): the mini-swe-agent recipe, one ```bash
+  # block per reply and a fresh subshell per command. The model submits with curl as the task text
+  # says; the limits end a stage without a submission. No temperature is sent (provider default),
+  # as with the CLI agents, and nothing model-specific: --reasoning-effort sets the effort.
+  - name: baseline
+    kickoff_command: python -m clients.baseline.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BASELINE_HARD_CAP: "80"
+      BASELINE_DEADLINE_S: "1500"
+    install_script: null
+    agent_version: null
