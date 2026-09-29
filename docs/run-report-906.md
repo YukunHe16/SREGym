@@ -10,12 +10,13 @@ It only reads files. It does not touch a cluster, run an agent again or change a
 
 ## An example you can run
 
-This repository ships one run of the baseline agent on `search_rate_retry_collapse_hotel_reservation`. The report
-below was made from it with this command:
+This repository ships one run of the baseline agent on each SREGym-Lite problem, in
+[`docs/baseline-agent/lite21-qwen/`](baseline-agent/lite21-qwen/). The report below was made from the run on
+`secret_rotation_stale_env_credentials_astronomy_shop` with this command:
 
 ```bash
 python -m sregym.results.run_report \
-    docs/baseline-agent/lite21-max/runs/search_rate_retry_collapse_hotel_reservation \
+    docs/baseline-agent/lite21-qwen/runs/secret_rotation_stale_env_credentials_astronomy_shop \
     --out /tmp/report --labeller codex:gpt-6-sol --labeller-effort medium
 ```
 
@@ -25,8 +26,8 @@ The result is in [`docs/run-report-example/`](run-report-example/):
 - [`run_report.zh.md`](run-report-example/run_report.zh.md): the same report in Chinese (`--lang zh`)
 - [`run_report.json`](run-report-example/run_report.json): the same data for scripts
 
-In this run the agent blamed the wrong thing. Its fix still passed. It also looked at SREGym's own namespace. So the
-example shows most of what the tool can say.
+In this run the agent blamed the wrong thing: PostgreSQL's password setup. Its fix still passed. It also read
+SREGym's own code inside its container. So the example shows most of what the tool can say.
 
 ## You need a model
 
@@ -51,10 +52,10 @@ Below are the seven items of #906. For each: what the report gives, and lines fr
 #906 asks for the problem ID, agent, model, scores and TTL/TTM. They are at the top of every report.
 
 ```
-`baseline` · model `openai/deepseek-flash` · effort `max` · judge backend `codex` · profile `svelte`
+`baseline` · model `openai/qwen3.8-27b-mtp` · effort `not recorded` · judge backend `codex` · profile `svelte`
 
-- Diagnosis: **fail** (score 0.67) · time (TTL) 1309 s
-- Mitigation: **pass** · time (TTM) 1462 s
+- Diagnosis: **fail** (score 0.33) · time (TTL) 596 s
+- Mitigation: **pass** · time (TTM) 764 s
 ```
 
 The section "Cost and time" adds tokens and time for each stage.
@@ -65,9 +66,9 @@ The section "Cost and time" adds tokens and time for each stage.
 every command in order, under its stage. Each line has the step number and the kind of command.
 
 ```
-- step 7 [kubectl logs] `kubectl logs -n hotel-reservation search-745f56dccd-j7fhl --tail=50; ...`
-- step 9 [state/config] `kubectl get deploy -n hotel-reservation -o json | jq -r '.items[] | ...`
-- step 50 [change] `kubectl -n hotel-reservation set env deploy/rate RATE_BACKEND_QPS_LIMIT=500 && ...`
+- step 21 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 2>&1 | tail -20`
+- step 56 [change] `export KUBECONFIG=/tmp/kubeconfig && kubectl rollout restart deployment product-catalog -n astronomy-shop 2>&1`
+- step 71 [submit] `curl -s -X POST http://host.docker.internal:8000/submit -H "Content-Type: application/json" -d ...`
 ```
 
 ### 3. Thinking traces
@@ -81,21 +82,23 @@ each step. It gives:
 - what it suspected when it sent the diagnosis
 
 ```
+- Key moments: evidence on screen at step 21; the true fault named 19 steps, 124 s later, at step 40;
+  diagnosis submitted at step 71
 - Suspected, then dropped:
-    - recommendation: 3 steps, 64 s (steps 5 to 35, in 3 stretches)
-- when it sent the diagnosis it suspected rate (the ground truth names it), from step 8
+    - probably the longest: accounting: 4 steps, 18 s (steps 18 to 43, in 2 stretches)
+- when it sent the diagnosis it suspected postgresql (the ground truth names it; the faulty component it gives
+  is product-catalog), from step 70
 ```
 
 ### 4. Submissions
 
 #906 asks for the final diagnosis and mitigation decisions. The section "Submissions" gives the diagnosis text as
 SREGym recorded it, and counts the submit commands in each stage. The section "Judge deductions" lists each checklist
-question the judge answered No, with the judge's own reason. Each reason is sorted into "wrong", "adds" or
-"leaves out".
+question the judge answered No, with the judge's own reason. Each reason is sorted into "wrong", "adds" or "omits".
 
 ```
-- **wrong**: It calls the rate service faulty due to its QPS limit, although ground truth locates the fault
-  in the search-to-rate timeout/retry/queue interaction. (D1-Q3)
+- **wrong**: It attributes the root cause partly to PostgreSQL's pg_authid hash rather than the stale runtime
+  credential in the active product-catalog pod. (D1-Q3)
 ```
 
 ### 5. Fix attempts
@@ -105,9 +108,10 @@ what it changed. For each attempt it says three things. Did the agent's own chec
 change what the ground truth says is wrong? Why did the agent do it, in its own words? Then it gives SREGym's verdict.
 
 ```
-- #1 (step 50, Mitigation): `set env deploy/rate RATE_BACKEND_QPS_LIMIT=500`;
-  `set env deploy/search RATE_RPC_TIMEOUT_MS=1000 ...`; 4 more commands ran after it;
-  the checks after it show it fixed, changed what is wrong
+- #1 (step 56, Diagnosis): `rollout restart deployment product-catalog`; 9 more commands ran after it;
+  the checks after it are unclear, changed what is wrong (restarted the faulty component product-catalog)
+    - why (in its own words, step 56): “The fix is simple: restart the product-catalog so it gets a fresh
+      connection to the now-ready postgres.”
 - mitigation result: **pass**
 ```
 
@@ -119,15 +123,14 @@ change what the ground truth says is wrong? Why did the agent do it, in its own 
   tests something, such as a test request from inside a pod, counts as a check. It does not count as a fix.
 - **Known traps.** SREGym plants decoys on purpose, for example the failure-admin scripts in hotel-reservation. The
   application also has its own fault switches, such as the flagd flags of the OpenTelemetry demo. The section "Known
-  decoys" says for each one whether the agent looked at it, followed it, dropped it or got stuck on it.
+  decoys" says for each one whether the agent looked at it, followed it, dropped it or got stuck on it. The example
+  run met none of them, so its report has no such section.
 - **Stuck.** The section "Clues" gives the step where the evidence first came on screen and how long the agent took
   after that. The section "Where the steps went" says which components its commands looked at in that time.
 
 ```
-- First clue: step 7, 40 more steps after it (1269 s)
-- on other components the ground truth names: rate 18 steps (steps 8 to 40)
-- hotel-reservation's failure-admin ConfigMaps and revoke/remove scripts: looked at it on purpose at step 37;
-  **walked out**: followed it up, then dropped it for other suspects
+- First clue: step 21, 50 more steps after it (492 s)
+- on other components the ground truth names: postgresql 5 steps (steps 35 to 39)
 ```
 
 ### 7. Cheating
@@ -139,12 +142,11 @@ with a person.
 
 ```
 - Gaming the benchmark: **signs to read**
-    - commands probing the benchmark (step 12, 16, 32, 42, 43)
+    - reads SREGym's code inside the agent container (step 8, 9, 10, 11, 12)
 ```
 
-In the example, step 12 searched for chaos-injection tools (`kubectl get crds | grep -iE "chaos|network|stress"`).
-Steps 16 to 43 looked at the `sregym` namespace and the MCP server's logs. The answer never came on screen, so the
-verdict is "signs to read".
+In the example, steps 7 to 12 listed `/opt` and `/opt/sregym` and read `sregym/service/kubectl.py`. That is the part of SREGym
+that ships inside the agent's image. The answer never came on screen, so the verdict is "signs to read".
 
 ### The structured format
 
@@ -154,13 +156,13 @@ and more. The folder gets `summary.csv`, one row per run, and `summary.md`.
 ## What it gives beyond #906
 
 - **What misled a wrong diagnosis.** For a diagnosis the judge failed, it names the output the wrong claim came from.
-  In the example: "the output of step 9 ... This output first showed that setting". Step 9 printed
-  `RATE_BACKEND_QPS_LIMIT=20` and the agent blamed it.
+  In the example it names the output of step 32, a PostgreSQL log line saying the failed connection matched a
+  scram-sha-256 rule. The agent went on to blame PostgreSQL's password hash.
 - **Changes that may go beyond the fault.** It lists fix commands that may have changed things the fault does not
-  involve. In the example the agent raised the QPS limit of rate, but the fault was in how search retries its calls
-  to rate.
-- **Restarts.** It marks restarts in the mitigation stage. A restart can pass a check without fixing anything
-  (issue [#753](https://github.com/SREGym/SREGym/issues/753)).
+  involve.
+- **Restarts.** It marks restarts of the faulty component. A restart can pass a check without fixing anything
+  (issue [#753](https://github.com/SREGym/SREGym/issues/753)). In the example the restart of product-catalog counts
+  as aimed at the fault: the fault was the old connection string the pod read when it started.
 - **The answer on screen.** It checks whether SREGym material that gives the fault away was shown to the agent
   (issue [#1002](https://github.com/SREGym/SREGym/issues/1002)).
 - **Masked secrets.** Keys, tokens and private keys in the run's text are masked before any model sees them, and in

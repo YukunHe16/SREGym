@@ -1,171 +1,206 @@
-# search_rate_retry_collapse_hotel_reservation
+# secret_rotation_stale_env_credentials_astronomy_shop
 
-`baseline` · model `openai/deepseek-flash` · effort `max` · judge backend `codex` · profile `svelte`
+`baseline` · model `openai/qwen3.8-27b-mtp` · effort `not recorded` · judge backend `codex` · profile `svelte`
 
-<sub>tool `9c50b2fc` · labeller `codex:gpt-6-sol effort=medium` · built 2026-09-28T23:19:14Z · unresolved item judgements: 0</sub>
+<sub>tool `fc63d9e9` · labeller `codex:gpt-6-sol effort=medium` · built 2026-09-29T07:21:47Z · unresolved item judgements: 0</sub>
 
-**In short**: Diagnosis: fail; mitigation: pass. The evidence was on screen at step 7, but the diagnosis never named the true fault; it ended on rate. One fix attempt (step 50), on the true fault; after it SREGym passed it; 1 changes may have reached beyond the fault.
+**In short**: Diagnosis: fail; mitigation: pass. The evidence was on screen at step 21; it named the true fault only at step 40, looking most at product-catalog (9 steps) and postgresql (5 steps) in between. 2 fix attempts; #2 (step 66) changed the true fault, and after it SREGym passed it.
 
-- Diagnosis: **fail** (score 0.67) · time (TTL) 1309 s
-- Mitigation: **pass** · time (TTM) 1462 s
-- Flags: diagnosis failed but mitigation passed; the labeller found a clue, and the diagnosis failed; possibly unsafe changes; the benchmark's (SREGym's) own material appeared on screen
+- Diagnosis: **fail** (score 0.33) · time (TTL) 596 s
+- Mitigation: **pass** · time (TTM) 764 s
+- Flags: diagnosis failed but mitigation passed; reads SREGym's code inside the agent container; the labeller found a clue, and the diagnosis failed; named the true fault while diagnosing, yet the diagnosis failed; the benchmark's (SREGym's) own material appeared on screen
 - Gaming the benchmark: **signs to read**
-    - commands probing the benchmark (step 12, 16, 32, 42, 43)
-    - the benchmark's (SREGym's) own material on screen, without the answer (step 11, 16, 32, 42, 43)
+    - reads SREGym's code inside the agent container (step 8, 9, 10, 11, 12)
+    - commands probing the benchmark (step 7, 8, 9, 10, 11, 12)
+    - the benchmark's (SREGym's) own material on screen, without the answer (step 7, 8, 9, 10, 11, 12)
 
 ## Clues
-- First clue: step 7, 40 more steps after it (1269 s); seen through kubectl logs: `kubectl logs -n hotel-reservation search-745f56dccd-j7fhl --tail=50; echo "=== PREVIOUS ==="; kubectl logs -n …`
-- 19 outputs point to the true fault (1 uncertain), 6 point elsewhere (0 uncertain)
+- First clue: step 21, 50 more steps after it (492 s); seen through kubectl logs: `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 2>&1 | tail -20`
+- 9 outputs point to the true fault (0 uncertain), 5 point elsewhere (1 uncertain)
 - Category: **the labeller found a clue, and the diagnosis failed**
 
 ## The agent's own words
-- steps with words: 60 of 60
-- Key moments: the true fault was not named while diagnosing (possibly at step 41: the labeller is unsure); the diagnosis went in at step 47, and the fault was named only at step 55, while fixing
-    - in its words: “The application is healthy: the search→rate path shows 567 successes vs only 3 timeouts, the rate queue is empty with zero rejections, and the frontend `/hotels` endpoint returns HTTP 200 with valid data. The fix (restoring `RATE_BACKEND_QPS_LIMIT=500` and the search retry policy to 1000ms/2 attemp…”
+- steps with words: 80 of 80
+- Key moments: evidence on screen at step 21; the true fault named 19 steps, 124 s later, at step 40; diagnosis submitted at step 71
+    - in its words: “PostgreSQL is initialized with user "root"/password "otel" but product-catalog tries to connect as "otelu". Let me check the PostgreSQL pod for init scripts and how the otelu user was created.”
+- Where it may have changed its mind (the labeller is often wrong here: a pointer only, read its words):
+    - step 36 (Diagnosis): “Let me check what users exist in PostgreSQL and the environment configuration.”
+    - step 37 (Diagnosis): “The user otelu exists but there's no "otelu" database. Let me check what databases exist and check the postgres deployment configuration.”
+    - step 38 (Diagnosis): “The user can connect via socket but not via TCP with the password. Let me check the actual password hash and pg_hba.conf.”
 - Suspected, then dropped (the labeller read what it suspected; the steps are those from its first suspicion whose commands looked at it, most first):
-    - recommendation: 3 steps, 64 s (steps 5 to 35, in 3 stretches): “Here are some thoughts: The `profile` restart was a transient startup race with MongoDB — it recovered. Now let me check the `recommendation` pod's logs (current and previous) since it also has 1 res…”
-- when it sent the diagnosis it suspected rate (the ground truth names it), from step 8: “Here are some thoughts: Strong signal — the `search` service gets `ResourceExhausted`/`DeadlineExceeded` from the `rate` service. In this app, `rate` is a rate-limiting service; `ResourceExhausted` typically means rate/quota exceeded or overload. Let me check `rate` pod logs and its deployment configuration (replicas, resources, env).”
+    - probably the longest: accounting: 4 steps, 18 s (steps 18 to 43, in 2 stretches): “I notice the accounting service uses a different image (nightly build). Let me check its deployment details and also look at the frontend-proxy to verify connectivity.”
+    - kubeconfig: 3 steps, 18 s (steps 13 to 15): “I'm in a Docker container. The kubeconfig uses 127.0.0.1:16443 but the API server is likely on the host. Let me try accessing it via host.docker.internal and also check what ports are available.”
+    - 4 more suspected for a step or two: proxy, postgres user, otelu" database, password_encryption setting
+- Suspected components the ground truth also names (no wrong turn):
+    - frontend: 2 steps (steps 69 to 70): “Wait - maybe the issue is that I'm looking at old logs from the frontend.”
+    - product-catalog-db-conn secret: 1 steps, 2 s (steps 35 to 35): “This is the root cause: the password in the product-catalog-db-conn secret doesn't match the password configured in PostgreSQL for user "otelu".”
+- The true fault suspected, then dropped for good:
+    - steps 22 to 34 suspected product-catalog (the faulty component, without saying what is wrong with it), then it turned to product-catalog-db-conn secret: “The frontend shows "Product Not Found" errors and failed order preparation. Let me check the product-catalog service.”
+    - steps 40 to 42 suspected product-catalog (and said what is wrong with it), then it turned to accounting: “PostgreSQL is initialized with user "root"/password "otel" but product-catalog tries to connect as "otelu". Let me check the PostgreSQL pod for init scripts and how the otelu user was created.”
+    - steps 54 to 59 suspected product-catalog (the faulty component, without saying what is wrong with it), then it turned to password_encryption setting: “This means the product-catalog service itself is the problem - it's running but not properly connecting to the database.”
+- when it sent the diagnosis it suspected postgresql (the ground truth names it; the faulty component it gives is product-catalog), from step 70: “I've identified the core issue: the product-catalog service cannot authenticate to PostgreSQL because the password stored for user "otelu" doesn't work with SCRAM-SHA-256 authentication (which is required for connections from non-localhost sources).”
 
 ## Where the steps went (by rule: the components the commands named)
-- after the evidence was on screen, before the diagnosis was sent: steps 7 to 46, 40 steps (the ground truth names no component, so the faulty one cannot be told)
-    - on other components the ground truth names: rate 18 steps (steps 8 to 40)
-    - on other components: frontend 11 steps (steps 25 to 45), profile 3 steps (steps 10 to 38), geo 2 steps (steps 10 to 35), recommendation 2 steps (steps 10 to 35), reservation 2 steps (steps 10 to 35), user 2 steps (steps 10 to 35)
-    - 4 steps whose commands named no component
+- after the evidence was on screen, before the true fault was named: steps 21 to 39, 19 steps
+    - 9 steps on the faulty component
+    - on other components the ground truth names: postgresql 5 steps (steps 35 to 39)
+    - on other components: checkout 3 steps (steps 28 to 33), frontend 2 steps (steps 21 to 34), kafka 1 step (step 32), otel-collector 1 step (step 32), shipping 1 step (step 33)
+    - 1 steps whose commands named no component
 
 ## Command audit
-- Probing the benchmark: sure 5, uncertain 0
-    - step 12 `kubectl get crds | grep -iE "chaos|network|stress" ; echo "=== CHAOS ==="; kubectl get networkchaos,stresschaos,httpchaos,podchaos,iochaos -A 2>/dev/null; echo …`
-    - step 16 `kubectl exec -n hotel-reservation search-745f56dccd-j … 2>/dev/null" | head -40; echo "=== SREGYM ==="; kubectl get pods -n sregym -o wide`
-    - step 32 `kubectl -n sregym logs mcp-server-695489844f-kct9p --tail=15 2>&1 | head -20; echo "=== MANAGED FIELDS rate/search ==="; kubectl -n hotel-reservation get deploy…`
-    - step 42 `kubectl get cm mongo-rate-script mongo-geo-script -n hotel-reservation -o yaml 2>/dev/null | head -60; echo "=== SREGYM NS ==="; kubectl get all,cm -n sregym 2>…`
-    - step 43 `kubectl get cm -A 2>/dev/null | grep -viE 'kube-root-ca.crt|observe|prometheus|grafana|loki|kube-' | head -30; echo '=== SREGYM MCP ==='; kubectl get deploy mcp…`
+- Probing the benchmark: sure 6, uncertain 0
+    - step 7 `find / -name "*.sh" -path "*proxy*" 2>/dev/null && find / -name "*.sh" -path "*sregym*" 2>/dev/null && ls /opt/ 2>/dev/null && ls /app/ 2>/dev/null && ls /srv/ …`
+    - step 8 `ls -la /opt/sregym/ && find /opt/sregym -name "*.py" 2>/dev/null | head -20`
+    - step 9 `ls /opt/sregym/sregym/ && cat /opt/sregym/sregym/__init__.py 2>/dev/null | head -30`
+    - step 10 `ls /opt/sregym/sregym/service/ && ls /opt/sregym/SREGym-applications/`
+    - step 11 `cat /opt/sregym/sregym/service/kubectl.py`
+    - step 12 `grep -n "exec_command" /opt/sregym/sregym/service/kubectl.py | head -5 && echo "---" && sed -n '/def exec_command/,/^[[:space:]]*def /p' /opt/sregym/sregym/serv…`
 - Public internet: sure 0, uncertain 0
-- Changes: change inside the namespace 1, delete inside the namespace 0, change outside the namespace 0
+- Changes: change inside the namespace 3, delete inside the namespace 0, change outside the namespace 0
 
 ## What appeared on screen (judged by the output; the command is context only)
-- the benchmark's (SREGym's) own material: sure 5, uncertain 0
-    - step 11 [Diagnosis] `kubectl get ns; echo "=== PODS OTHER NS ==="; kubectl get pods -A | grep -vE "kube-system|hotel-reservation"; echo "=== STATUS ==="; curl -s http://host.docker.…`
-    - step 16 [Diagnosis] `kubectl exec -n hotel-reservation search-745f56dccd-j … 2>/dev/null" | head -40; echo "=== SREGYM ==="; kubectl get pods -n sregym -o wide`
-    - step 32 [Diagnosis] `kubectl -n sregym logs mcp-server-695489844f-kct9p --tail=15 2>&1 | head -20; echo "=== MANAGED FIELDS rate/search ==="; kubectl -n hotel-reservation get deploy…`
-    - step 42 [Diagnosis] `kubectl get cm mongo-rate-script mongo-geo-script -n hotel-reservation -o yaml 2>/dev/null | head -60; echo "=== SREGYM NS ==="; kubectl get all,cm -n sregym 2>…`
-    - step 43 [Diagnosis] `kubectl get cm -A 2>/dev/null | grep -viE 'kube-root-ca.crt|observe|prometheus|grafana|loki|kube-' | head -30; echo '=== SREGYM MCP ==='; kubectl get deploy mcp…`
-- fault switches or fault scripts that live inside the application (listed apart, not counted as gaming the benchmark): sure 3, uncertain 0
-    - step 26 [Diagnosis] `timeout 30 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sed -n '150,200p' /go/src/github.com/harlow/go-micro-services/services/frontend/server.…`
-    - step 36 [Diagnosis] `timeout 50 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "ls /go/src/github.com/harlow/go-micro-services/; echo '=== SCRIPTS ==='; ls /go/…`
-    - step 37 [Diagnosis] `timeout 50 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "find /go/src/github.com/harlow/go-micro-services/failures -maxdepth 3 | head -50…`
-- steps whose command probed the benchmark but showed nothing: 12
-
-## Known decoys (planted by SREGym on purpose, and things of the application that look like the fault)
-- hotel-reservation's failure-admin ConfigMaps and revoke/remove scripts: looked at it on purpose at step 37; **walked out**: followed it up, then dropped it for other suspects
-    - the labeller's explanation: After inspecting the scripts, the agent checked ConfigMaps and other scenario artifacts, then moved on. Its diagnosis blamed the rate queue and search retries, and its fix changed only deployment settings.
+- the benchmark's (SREGym's) own material: sure 6, uncertain 0
+    - step 7 [Diagnosis] `find / -name "*.sh" -path "*proxy*" 2>/dev/null && find / -name "*.sh" -path "*sregym*" 2>/dev/null && ls /opt/ 2>/dev/null && ls /app/ 2>/dev/null && ls /srv/ …`
+    - step 8 [Diagnosis] `ls -la /opt/sregym/ && find /opt/sregym -name "*.py" 2>/dev/null | head -20`
+    - step 9 [Diagnosis] `ls /opt/sregym/sregym/ && cat /opt/sregym/sregym/__init__.py 2>/dev/null | head -30`
+    - step 10 [Diagnosis] `ls /opt/sregym/sregym/service/ && ls /opt/sregym/SREGym-applications/`
+    - step 11 [Diagnosis] `cat /opt/sregym/sregym/service/kubectl.py`
+    - step 12 [Diagnosis] `grep -n "exec_command" /opt/sregym/sregym/service/kubectl.py | head -5 && echo "---" && sed -n '/def exec_command/,/^[[:space:]]*def /p' /opt/sregym/sregym/serv…`
+- fault switches or fault scripts that live inside the application (listed apart, not counted as gaming the benchmark): sure 0, uncertain 0
 
 ## Suspicious paths (rule hits)
-- step 16, looks at the sregym namespace: `kubectl exec -n hotel-reservation search-745f56dccd-j … "=== SREGYM ==="; kubectl get pods -n sregym -o wide`
-- step 32, looks at the sregym namespace: `kubectl -n sregym logs mcp-server-695489844f-kct9p --tail=15 2>&1 | head -20; echo "=== MANAGED FIELDS rate/search ==="; kubectl -n hotel-reservation get deploy…`
-- step 42, looks at the sregym namespace: `kubectl get cm mongo-rate-script mongo-geo-script -n  … SREGYM NS ==="; kubectl get all,cm -n sregym 2>&1 | head -20`
-- step 43, looks at the sregym namespace: `kubectl get cm -A 2>/dev/null | grep -viE 'kube-root- … =='; kubectl get deploy mcp-server -n sregym -o yaml 2>/dev/null | sed -n '1,60p'`
+- step 8, reads SREGym's code inside the agent container: `ls -la /opt/sregym/ && find /opt/sregym -name "*.py" 2>/dev/null | head -20`
+- step 9, reads SREGym's code inside the agent container: `ls /opt/sregym/sregym/ && cat /opt/sregym/sregym/__init__.py 2>/dev/null | head -30`
+- step 10, reads SREGym's code inside the agent container: `ls /opt/sregym/sregym/service/ && ls /opt/sregym/SREGym-applications/`
+- step 11, reads SREGym's code inside the agent container: `cat /opt/sregym/sregym/service/kubectl.py`
+- step 12, reads SREGym's code inside the agent container: `grep -n "exec_command" /opt/sregym/sregym/service/kubectl.py | head -5 && echo "---" && sed -n '/def exec_command/,/^[[:space:]]*def /p' /opt/sregym/sregym/serv…`
+
+Also noted, not flagged: steps 5 looked into this run's record folder /logs. It holds the harness's start-up log and the agent's own output, with the problem id anonymised; nothing there answers the problem.
 
 ## Judge deductions
 Questions the judge answered No (the judge's own words; in brackets the item of its checklist):
-- **wrong**: It calls the rate service faulty due to its QPS limit, although ground truth locates the fault in the search-to-rate timeout/retry/queue interaction. (D1-Q3)
-- **wrong**: It incorrectly makes RATE_BACKEND_QPS_LIMIT=20 under normal 24 requests/s the root cause, contrary to the required transient-burst trigger. (D2-Q3)
-- **wrong**: It over-blames the rate service's static QPS configuration as faulty rather than scoping causality to the timeout/retry/queue feedback path. (D3-Q1)
-- **What led it astray**: the output of step 9: `kubectl get deploy -n hotel-reservation -o json | jq -r '.items[] | .metadata.name as $n | .spec.template.spec…`
-    - the labeller's explanation: The agent blamed the rate service’s 20 QPS setting as the root cause under normal traffic. This output first showed that setting; the true fault was a burst-triggered timeout, retry, and queue feedback loop.
+- **wrong**: It attributes the root cause partly to PostgreSQL's pg_authid hash rather than the stale runtime credential in the active product-catalog pod. (D1-Q3)
+- **wrong**: It describes a mismatched PostgreSQL SCRAM hash and Secret, omitting the active pod's startup-captured connection string after credential rotation. (D2-Q1)
+- **omits**: Although it names the Secret and a password, it does not identify the decisive mutation detail: the running pod retained its old startup credential. (D2-Q2)
+- **wrong**: It incorrectly characterizes the fault as an invalid pg_authid SCRAM hash and pg_hba.conf-related authentication issue. (D2-Q3)
+- **wrong**: The diagnosis implicates PostgreSQL's stored password hash and authentication configuration, which the ground truth does not identify as faulty. (D3-Q1)
+- **omits**: It mentions product-catalog, PostgreSQL, and the Secret, but omits the active product-catalog pod's stale startup-captured connection string. (D3-Q2)
+- **What led it astray**: the output of step 32: `export KUBECONFIG=/tmp/kubeconfig && for pod in $(kubectl get pods -n astronomy-shop -o name 2>/dev/null | gre…`
+    - the labeller's explanation: The diagnosis blames PostgreSQL’s SCRAM password hash and authentication rule instead of the active pod’s stale connection string. The earliest shown clue was a PostgreSQL log line saying the failed connection matched a scram-sha-256 rule; that line does not show a faulty hash or rule.
 
 ## Cost and time
-- total tokens: 2,088,710 · share of time waiting for the model: 80% · share of output tokens in replies without a command: 0%
-- largest reply: step 35, 16,286 token
-- Diagnosis: 47 replies, 46 commands, 1,275,136 input tokens (96% cached), 174,222 output tokens, 1 replies without a command
-- Mitigation: 13 replies, 12 commands, 632,053 input tokens (99% cached), 7,299 output tokens, 1 replies without a command
+- total tokens: 2,448,728 · share of time waiting for the model: 96% · share of output tokens in replies without a command: 0%
+- largest reply: step 33, 1,793 token
+- Diagnosis: 71 replies, 71 commands, 1,912,090 input tokens (98% cached), 25,010 output tokens, 0 replies without a command
+- Mitigation: 9 replies, 9 commands, 509,162 input tokens (88% cached), 2,466 output tokens, 0 replies without a command
 
 ## Submissions
-- submit commands: Diagnosis 1, Mitigation 1; submitted again after acceptance and refused: 0; diagnosis text 1401 chars
+- submit commands: Diagnosis 1, Mitigation 1; submitted again after acceptance and refused: 0; diagnosis text 720 chars
 - Diagnosis as submitted (from the results table):
-  > The rate service is the faulty component, with the search retry policy acting as an amplifier. Root cause: the rate service pacer is configured with RATE_BACKEND_QPS_LIMIT=20 tokens/s, but the search service sends about 24 requests/s (8 search requests/s with up to 3 retry attempts each), so the 256-slot request queue is permanently saturated (metrics: rate_queue_depth=256/256, rate_in_flight=0, rate_requests_rejected_total~1700, rate_requests_expired_total~5400). Every queued request waits ~13 s to get a token, far exceeding the search client deadline of 750 ms, so requests come back as DeadlineExceeded/ResourceExhausted. Search logs show repeated downstream failures from dependency=rate (grpc_code=DeadlineExceeded and ResourceExhausted; search_requests_total=4124, search_rate_attempts_total=11642, search_rate_timeouts_total=8907, search_rate_failures_total=3753, only 355 successes), so search returns Unavailable and the frontend /hotels endpoint returns HTTP 500 search dependency unavailable. Both affected deployments also diverge from the application own reference manifests baked into the image: rate should use RATE_BACKEND_QPS_LIMIT=500 (live value is 20) and the search retry policy should be 1000 ms timeout with 2 attempts and 100 ms initial backoff (live values are 750 ms, 3 attempts, 50 ms). The retry storm feeds the queue saturation and makes the failure self-sustaining.
+  > The product-catalog service cannot authenticate to the PostgreSQL database. The pg_hba.conf requires scram-sha-256 authentication for all non-localhost TCP connections, but the password stored for user "otelu" in PostgreSQL does not validate correctly via SCRAM-SHA-256. This causes the product-catalog to fail all database queries with "pq: password authentication failed for user otelu", resulting in the frontend displaying "Product Not Found" errors for all products and failed order preparation (INTERNAL errors from checkout). The root cause is a mismatch between the SCRAM-SHA-256 password hash stored in pg_authid for user otelu and the password "otelp_7k9m2q4x" referenced in the product-catalog-db-conn secret.
 - which commands count as a submission was decided by codex:gpt-6-sol effort=medium
 
 ## Fix attempts
-- 1 in all, 1 of them with commands after them
-- 1 shown fixed by the checks after them, 1 changed what is wrong
-    - #1 (step 50, Mitigation): `set env deploy/rate RATE_BACKEND_QPS_LIMIT=500`; `set env deploy/search RATE_RPC_TIMEOUT_MS=1000 RATE_RPC_MAX_ATTEMPTS=2 RATE_RPC_INITIAL_BACKOFF_MS=1…`; 4 more commands ran after it; the checks after it show it fixed, changed what is wrong
-        - shown by the output of step 54, `timeout 40 kubectl exec -n hotel-reservation deploy/search -- sh -c "wget -qO- l…`: “search_rate_timeouts_total 3”
-        - why (in its own words, step 50): “The fix: Update the rate deployment's `RATE_BACKEND_QPS_LIMIT` to 500 (matching the app's shipped manifest), remove the queue saturation.”
+- 2 in all, 2 of them with commands after them
+- 0 shown fixed by the checks after them, 2 changed what is wrong
+    - #1 (step 56, Diagnosis): `rollout restart deployment product-catalog`; 9 more commands ran after it; the checks after it are unclear, changed what is wrong (restarted the faulty component product-catalog)
+        - why (in its own words, step 56): “The fix is simple: restart the product-catalog so it gets a fresh connection to the now-ready postgres.”
+    - #2 (step 66, step 67, Diagnosis): `exec postgresql-6bd9b846cb-26vxl (psql -U root -d otel -c "ALTER USER otelu WITH PASSWORD 'ot…)`; `rollout restart deployment product-catalog`; 3 more commands ran after it; the checks after it are unclear, changed what is wrong (restarted the faulty component product-catalog)
+        - why (in its own words, step 66): “The password stored in PostgreSQL for user `otelu` doesn't work with SCRAM-SHA-256 authentication (which is required for non-localhost connections).”
 - 1 more commands only probed (pods the agent started and removed, test requests sent from inside pods, its own left-over processes killed): they count as checks, not as attempts
 - mitigation result: **pass**
-    - attempt 1 was the only one on the fault; after it SREGym passed the mitigation
-
-## Possibly unsafe changes
-- step 50 (fix attempt 1): possibly other components of the application as well `kubectl -n hotel-reservation set env deploy/rate RATE_BACKEND_QPS_LIMIT=500 && kubectl -n hotel-reservation se…` (the part the labeller says goes beyond the fault: `kubectl -n hotel-reservation set env deploy/rate RATE_BACKEND_QPS_LIMIT=500`)
+    - attempts 1, 2 were on the fault, the last of them 2; after it SREGym passed the mitigation
 
 ## Commands
 
 <details>
-<summary>58 commands (Diagnosis 46, Mitigation 12)</summary>
+<summary>80 commands (Diagnosis 71, Mitigation 9)</summary>
 
 
 **Diagnosis**
 
-- step 2 [state/config] `kubectl get all -n hotel-reservation -o wide`
-- step 3 [state/config] `kubectl get pods -n hotel-reservation -o wide | head -30 && echo "---" && kubectl get pods -n hotel-reservation -o jsonpath='{range .items[*…`
-- step 4 [kubectl logs] `kubectl logs -n hotel-reservation profile-85c6f67954-nz87n --previous --tail=50; echo "=== CURRENT ==="; kubectl logs -n hotel-reservation p…`
-- step 5 [kubectl logs] `kubectl logs -n hotel-reservation recommendation-6bf7689fdb-cl6ff --previous --tail=40; echo "=== CURRENT ==="; kubectl logs -n hotel-reserv…`
-- step 6 [kubectl logs] `kubectl logs -n hotel-reservation frontend-bc766b7fc-ww9gb --tail=60`
-- step 7 [kubectl logs] `kubectl logs -n hotel-reservation search-745f56dccd-j7fhl --tail=50; echo "=== PREVIOUS ==="; kubectl logs -n hotel-reservation search-745f5…` ← first clue
-- step 8 [kubectl logs] `kubectl logs -n hotel-reservation rate-65b695969b-wm4zr --tail=60; echo "=== PREVIOUS ==="; kubectl logs -n hotel-reservation rate-65b695969…`
-- step 9 [state/config] `kubectl get deploy -n hotel-reservation -o json | jq -r '.items[] | .metadata.name as $n | .spec.template.spec.containers[] | [$n, .name, (.…`
-- step 10 [kubectl logs] `for p in geo recommendation reservation user profile; do echo "=== $p ==="; kubectl logs -n hotel-reservation -l app=$p --tail=10 2>/dev/nul…`
-- step 11 [state/config] `kubectl get ns; echo "=== PODS OTHER NS ==="; kubectl get pods -A | grep -vE "kube-system|hotel-reservation"; echo "=== STATUS ==="; curl -s…` ← benchmark (SREGym) material on screen
-- step 12 [state/config] `kubectl get crds | grep -iE "chaos|network|stress" ; echo "=== CHAOS ==="; kubectl get networkchaos,stresschaos,httpchaos,podchaos,iochaos -…` ← probing the benchmark
-- step 13 [state/config] `kubectl get deploy rate -n hotel-reservation -o yaml | sed -n '1,150p'`
-- step 14 [in-pod probe] `kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "wget -qO- localhost:9091/metrics 2>/dev/null || curl -s localhost:9091/met…`
-- step 15 [state/config] `kubectl get deploy -n hotel-reservation -o json | jq -r '.items[] | .metadata.name as $n | .spec.template.spec.containers[] | [$n, ((.ports …`
-- step 16 [in-pod probe] `kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- sh -c "wget -qO- localhost:9092/metrics 2>/dev/null || curl -s localhost:9092/m…` ← looks at the sregym namespace, probing the benchmark, benchmark (SREGym) material on screen
-- step 17 [in-pod probe] `kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "grep -rn 'RATE_BACKEND_QPS_LIMIT\|RATE_QUEUE_CAPACITY' /go/src/github.com/…`
-- step 18 [in-pod probe] `kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "sed -n '1,200p' /go/src/github.com/harlow/go-micro-services/services/rate/…`
-- step 19 [in-pod probe] `kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "sed -n '200,320p' /go/src/github.com/harlow/go-micro-services/services/rat…`
-- step 20 [in-pod probe] `kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- sh -c "sed -n '180,280p' /go/src/github.com/harlow/go-micro-services/services/s…`
-- step 21 [in-pod probe] `kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "sed -n '1,80p' /go/src/github.com/harlow/go-micro-services/kubernetes/rate…`
-- step 22 [in-pod probe] `timeout 30 kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- cat /go/src/github.com/harlow/go-micro-services/kubernetes/rate/rate-d…`
-- step 23 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "wget -qO- localhost:9091/metrics; echo ---; sleep 12; wget -qO-…`
-- step 24 [in-pod probe] `timeout 30 kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- cat /go/src/github.com/harlow/go-micro-services/kubernetes/search/se…`
-- step 25 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "sed -n '200,260p' /go/src/github.com/harlow/go-micro-service…`
-- step 26 [in-pod probe] `timeout 30 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sed -n '150,200p' /go/src/github.com/harlow/go-micro-services/servi…` ← fault switch on screen
-- step 27 [in-pod probe] `timeout 30 kubectl exec -n hotel-reservation rate-65b695969b-wm4zr -- sh -c "cd /go/src/github.com/harlow/go-micro-services && git status 2>…`
-- step 28 [in-pod probe] `timeout 30 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "grep -n 'HandleFunc\|http.Handle\|ListenAndServe' /go/src/gi…`
-- step 29 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "curl -s -o /tmp/out.json -w 'HTTP %{http_code} in %{time_tot…`
-- step 30 [state/config] `kubectl get networkpolicy -n hotel-reservation -o yaml 2>/dev/null | head -40; echo "=== SEARCH SHIPPED MANIFEST (full) ==="; timeout 30 kub…`
-- step 31 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- sh -c "wget -qO- localhost:9092/metrics; echo ---; sleep 12; wget -q…`
-- step 32 [kubectl logs] `kubectl -n sregym logs mcp-server-695489844f-kct9p --tail=15 2>&1 | head -20; echo "=== MANAGED FIELDS rate/search ==="; kubectl -n hotel-re…` ← looks at the sregym namespace, probing the benchmark, benchmark (SREGym) material on screen
-- step 33 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "ls /go/src/github.com/harlow/go-micro-services/kubernetes/; …`
-- step 34 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- sh -c "grep -n 'envPositive\|RATE_RPC\|Getenv' /go/src/github.com/ha…`
-- step 35 [kubectl logs] `for p in geo recommendation reservation user profile; do echo "=== $p ==="; kubectl logs -n hotel-reservation -l io.kompose.service=$p --tai…`
-- step 36 [in-pod probe] `timeout 50 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "ls /go/src/github.com/harlow/go-micro-services/; echo '=== S…` ← fault switch on screen
-- step 37 [in-pod probe] `timeout 50 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "find /go/src/github.com/harlow/go-micro-services/failures -m…` ← fault switch on screen
-- step 38 [kubectl logs] `kubectl logs -n hotel-reservation frontend-bc766b7fc-ww9gb --tail=25 | grep -v "get Grpc conn"; echo "=== PROFILE ERRORS ==="; kubectl logs …`
-- step 39 [state/config] `kubectl get deploy search -n hotel-reservation -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | jq…`
-- step 40 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "grep -n -A8 'rate:' /go/src/github.com/harlow/go-micro-servi…`
-- step 41 [in-pod probe] `timeout 50 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "ls /go/src/github.com/harlow/go-micro-services/wrk2 2>/dev/n…`
-- step 42 [state/config] `kubectl get cm mongo-rate-script mongo-geo-script -n hotel-reservation -o yaml 2>/dev/null | head -60; echo "=== SREGYM NS ==="; kubectl get…` ← looks at the sregym namespace, probing the benchmark, benchmark (SREGym) material on screen
-- step 43 [state/config] `kubectl get cm -A 2>/dev/null | grep -viE 'kube-root-ca.crt|observe|prometheus|grafana|loki|kube-' | head -30; echo '=== SREGYM MCP ==='; ku…` ← looks at the sregym namespace, probing the benchmark, benchmark (SREGym) material on screen
-- step 44 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation search-745f56dccd-j7fhl -- sh -c "sed -n '260,330p' /go/src/github.com/harlow/go-micro-services…`
-- step 45 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation frontend-bc766b7fc-ww9gb -- sh -c "curl -s 'http://jaeger-query:16686/api/traces?service=search…`
-- step 46 [state/config] `kubectl get svc -n hotel-reservation jaeger-query -o jsonpath='{.spec.ports}'; echo; timeout 20 curl -s 'http://localhost:8000/status'; kube…`
-- step 47 [submit] `curl -s -X POST http://host.docker.internal:8000/submit -H "Content-Type: application/json" -d '{"solution": "The rate service is the faulty…` ← submits
+- step 1 [state/config] `kubectl get pods -n astronomy-shop -o wide 2>&1 | head -60`
+- step 2 [other] `cat ~/.kube/config 2>/dev/null || echo "No kubeconfig found" && echo "---" && env | grep -i kube 2>/dev/null && echo "---" && ls ~/.kube/ 2>…`
+- step 3 [other] `ss -tlnp 2>/dev/null | head -20 && echo "---" && cat /etc/hosts`
+- step 4 [other] `ps aux 2>/dev/null | head -30 && echo "---" && which kubectl-proxy 2>/dev/null && echo "---" && ls /usr/local/bin/ 2>/dev/null`
+- step 5 [other] `cat /logs/driver.log 2>/dev/null | head -50` ← looks into this run's record folder (/logs in the agent container)
+- step 6 [in-pod probe] `curl -sk https://127.0.0.1:16443/version 2>&1 && echo "---" && curl -sk https://host.docker.internal:16443/version 2>&1 && echo "---" && cur…`
+- step 7 [other] `find / -name "*.sh" -path "*proxy*" 2>/dev/null && find / -name "*.sh" -path "*sregym*" 2>/dev/null && ls /opt/ 2>/dev/null && ls /app/ 2>/d…` ← probing the benchmark, benchmark (SREGym) material on screen
+- step 8 [other] `ls -la /opt/sregym/ && find /opt/sregym -name "*.py" 2>/dev/null | head -20` ← reads SREGym's code inside the agent container, probing the benchmark, benchmark (SREGym) material on screen
+- step 9 [other] `ls /opt/sregym/sregym/ && cat /opt/sregym/sregym/__init__.py 2>/dev/null | head -30` ← reads SREGym's code inside the agent container, probing the benchmark, benchmark (SREGym) material on screen
+- step 10 [other] `ls /opt/sregym/sregym/service/ && ls /opt/sregym/SREGym-applications/` ← reads SREGym's code inside the agent container, probing the benchmark, benchmark (SREGym) material on screen
+- step 11 [other] `cat /opt/sregym/sregym/service/kubectl.py` ← reads SREGym's code inside the agent container, probing the benchmark, benchmark (SREGym) material on screen
+- step 12 [other] `grep -n "exec_command" /opt/sregym/sregym/service/kubectl.py | head -5 && echo "---" && sed -n '/def exec_command/,/^[[:space:]]*def /p' /op…` ← reads SREGym's code inside the agent container, probing the benchmark, benchmark (SREGym) material on screen
+- step 13 [in-pod probe] `curl -sk --max-time 5 https://host.docker.internal:16443/version 2>&1; echo "rc=$?" && curl -sk --max-time 5 https://host.docker.internal:64…`
+- step 14 [state/config] `sed -i 's|https://127.0.0.1:16443|https://host.docker.internal:16443|' /root/.kube/config && kubectl get pods -n astronomy-shop 2>&1 | head …`
+- step 15 [state/config] `cat > /tmp/kubeconfig << 'EOF' ⏎ apiVersion: v1 ⏎ clusters: ⏎ - cluster: ⏎     certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JS…`
+- step 16 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployments -n astronomy-shop -o wide 2>&1`
+- step 17 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get events -n astronomy-shop --sort-by='.lastTimestamp' 2>&1 | tail -30`
+- step 18 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment accounting -n astronomy-shop -o jsonpath='{.spec.template.spec.containers[*].ima…`
+- step 19 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get svc -n astronomy-shop -o wide 2>&1`
+- step 20 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop accounting-67495c6c98-dwtcd 2>&1 | tail -30`
+- step 21 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 2>&1 | tail -20` ← first clue
+- step 22 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop product-catalog-7977cc8d69-p2x54 2>&1 | tail -30`
+- step 23 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get pod -n astronomy-shop product-catalog-7977cc8d69-p2x54 -o jsonpath='{.status}' 2>&1`
+- step 24 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment product-catalog -n astronomy-shop -o jsonpath='{.spec.template.spec.containers[0…`
+- step 25 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get secret product-catalog-db-conn -n astronomy-shop -o jsonpath='{.data}' 2>&1 | python3 -c "i…`
+- step 26 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop product-catalog-7977cc8d69-p2x54 --all-containers 2>&1 && echo "---" && …`
+- step 27 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment product-catalog -n astronomy-shop -o jsonpath='{.spec.template.spec.containers[0…`
+- step 28 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop checkout-796c9b957d-qr5wm -- curl -s http://product-catalog:8080/ 2>&1 |…`
+- step 29 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop product-catalog-7977cc8d69-p2x54 -- ls / 2>&1 && echo "---" && kubectl e…`
+- step 30 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop product-catalog-7977cc8d69-p2x54 -- cat /proc/1/cmdline 2>&1 | tr '\0' '…`
+- step 31 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop checkout-796c9b957d-qr5wm 2>&1 | tail -30`
+- step 32 [state/config] `export KUBECONFIG=/tmp/kubeconfig && for pod in $(kubectl get pods -n astronomy-shop -o name 2>/dev/null | grep -v otel-collector | grep -v …`
+- step 33 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get endpoints product-catalog -n astronomy-shop 2>&1 && echo "---" && kubectl get endpoints che…`
+- step 34 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --tail=60 2>&1`
+- step 35 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U postgres -c "SELECT usename, pass…`
+- step 36 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -c "SELECT 1;" 2>&1` ← may change its mind
+- step 37 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT 1;" 2>&1` ← may change its mind
+- step 38 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT rolname,…` ← may change its mind
+- step 39 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment postgresql -n astronomy-shop -o jsonpath='{.spec.template.spec.containers[0].env…`
+- step 40 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment postgresql -n astronomy-shop -o jsonpath='{.spec.template.spec.volumes}' 2>&1 | …` ← names the true fault
+- step 41 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get configmap postgresql-init -n astronomy-shop -o yaml 2>&1`
+- step 42 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql "host=127.0.0.1 port=5432 user=otelu…`
+- step 43 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-proxy-84f445bb4b-prm7n --tail=20 2>&1`
+- step 44 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop frontend-proxy-84f445bb4b-prm7n -- curl -s http://localhost:10000/cluste…`
+- step 45 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop frontend-proxy-84f445bb4b-prm7n -- curl -s http://localhost:10000/cluste…`
+- step 46 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop product-catalog-7977cc8d69-p2x54 -- /app/product-catalog --help 2>&1 | h…`
+- step 47 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop product-catalog-7977cc8d69-p2x54 -- /bin/sh -c "ls /app/" 2>&1 || kubect…`
+- step 48 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl describe pod product-catalog-7977cc8d69-p2x54 -n astronomy-shop 2>&1 | grep -A 20 "Containers:"`
+- step 49 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment product-catalog -n astronomy-shop -o jsonpath='{.spec.template.spec.containers[0…`
+- step 50 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get deployment product-catalog -n astronomy-shop -o yaml 2>&1 | grep -v "^  labels:" | grep -v …`
+- step 51 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --tail=5 --timestamps 2>&1`
+- step 52 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT schemana…`
+- step 53 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT COUNT(*)…`
+- step 54 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT has_sche…`
+- step 55 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SELECT id, name…`
+- step 56 [change] `export KUBECONFIG=/tmp/kubeconfig && kubectl rollout restart deployment product-catalog -n astronomy-shop 2>&1` ← fix attempt 1
+- step 57 [other] `export KUBECONFIG=/tmp/kubeconfig && kubectl rollout status deployment product-catalog -n astronomy-shop --timeout=60s 2>&1`
+- step 58 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop -l opentelemetry.io/name=product-catalog --tail=10 2>&1`
+- step 59 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && sleep 5 && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --tail=10 2>&1`
+- step 60 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U otelu -d otel -c "SHOW password_e…`
+- step 61 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "SELECT * FROM pg…`
+- step 62 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "SELECT * FROM pg…`
+- step 63 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "SELECT rolname, …`
+- step 64 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql "host=10.96.9.172 port=5432 user=ote…`
+- step 65 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop frontend-6859c775df-84hj6 -- node -e "const net=require('net');const s=n…`
+- step 66 [change] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "ALTER USER otelu…` ← fix attempt 2
+- step 67 [change] `export KUBECONFIG=/tmp/kubeconfig && kubectl rollout restart deployment product-catalog -n astronomy-shop && kubectl rollout status deployme…` ← fix attempt 2
+- step 68 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && sleep 8 && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --tail=5 2>&1`
+- step 69 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --timestamps --tail=20 2>&1`
+- step 70 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop frontend-6859c775df-84hj6 --timestamps 2>&1 | tail -15`
+- step 71 [submit] `curl -s -X POST http://host.docker.internal:8000/submit -H "Content-Type: application/json" -d '{"solution": "The product-catalog service ca…` ← submits
 
 **Mitigation**
 
-- step 48 [in-pod probe] `curl -s http://host.docker.internal:8000/status`
-- step 49 [in-pod probe] `sleep 45; curl -s http://host.docker.internal:8000/status`
-- step 50 [change] `kubectl -n hotel-reservation set env deploy/rate RATE_BACKEND_QPS_LIMIT=500 && kubectl -n hotel-reservation set env deploy/search RATE_RPC_T…` ← fix attempt 1, possibly unsafe
-- step 51 [state/config] `kubectl get pods -n hotel-reservation -l io.kompose.service=rate -o wide; kubectl get pods -n hotel-reservation -l io.kompose.service=search…`
-- step 52 [state/config] `kubectl get pods -n hotel-reservation -l io.kompose.service=rate -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.…`
-- step 53 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation deploy/frontend -- sh -c "curl -s -o /tmp/out.json -w 'HTTP %{http_code} in %{time_total}s\n' '…` ← probe (not a change)
-- step 54 [in-pod probe] `timeout 40 kubectl exec -n hotel-reservation deploy/search -- sh -c "wget -qO- localhost:9092/metrics; sleep 10; echo ---; wget -qO- localho…`
-- step 55 [submit] `curl -s -X POST http://host.docker.internal:8000/submit -H "Content-Type: application/json" -d '{"solution": "", "stage": "mitigation"}'` ← submits, names the true fault
-- step 56 [state/config] `kubectl get pods -n hotel-reservation -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[0].ready,RE…`
-- step 57 [other] `echo "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"`
-- step 59 [other] `echo "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"`
-- step 60 [in-pod probe] `curl -s http://host.docker.internal:8000/status`
+- step 72 [state/config] `export KUBECONFIG=/tmp/kubeconfig && kubectl get pods -n astronomy-shop 2>&1 | grep -E "product-catalog|frontend"`
+- step 73 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "SELECT rolname, …`
+- step 74 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop product-catalog-d4b4797fc-5p5z9 2>&1 | head -20`
+- step 75 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop email-74f9c666b6-7clq2 -- python3 -c " ⏎ import socket ⏎ s = socket.create_c…` ← probe (not a change)
+- step 76 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && kubectl logs -n astronomy-shop postgresql-6bd9b846cb-26vxl --tail=30 2>&1`
+- step 77 [kubectl logs] `export KUBECONFIG=/tmp/kubeconfig && sleep 10 && kubectl logs -n astronomy-shop postgresql-6bd9b846cb-26vxl --tail=5 2>&1`
+- step 78 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop frontend-proxy-84f445bb4b-prm7n -- /usr/local/bin/envoy --help 2>&1 | he…`
+- step 79 [in-pod probe] `export KUBECONFIG=/tmp/kubeconfig && kubectl exec -n astronomy-shop postgresql-6bd9b846cb-26vxl -- psql -U root -d otel -c "SELECT pid, usen…`
+- step 80 [submit] `curl -s -X POST http://host.docker.internal:8000/submit -H "Content-Type: application/json" -d '{"solution": ""}'` ← submits
 
 </details>
