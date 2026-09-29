@@ -101,3 +101,8 @@ Per problem, under `runs/<problem>/`:
 
 The driver also writes `steps/step_NN/` with the exact message list sent at each step.
 It is not kept here; the per-step reasoning it holds is in `trajectory.json`.
+
+The agent printed the token of SREGym's Kubernetes proxy (in its kubeconfig and in `kubectl --token=...`). That
+token is made new each time the proxy starts, and these runs' proxies have stopped, so it no longer works. It is
+still replaced with `[credential masked]` in these files. The `sha256` of each output in the transcripts was taken
+before that, so it no longer matches the stored text where a token was masked.
