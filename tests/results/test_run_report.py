@@ -4614,3 +4614,31 @@ def test_the_reasoning_effort_reaches_the_subscription_labellers(monkeypatch, tm
     claude = make_labellers("claudecode:claude-sonnet-5-5", [], None, tmp_path, effort="medium").default
     assert codex.name == "codex:gpt-6-sol effort=high"
     assert claude.name == "claudecode:claude-sonnet-5-5 effort=medium"
+
+
+def test_codex_failure_is_read_from_its_own_error_lines(monkeypatch):
+    import subprocess
+
+    from sregym.results.run_report.labeller import CodexLabeller, LabellerError, LabellerUnusable
+
+    header = "OpenAI Codex v0.157.1\n--------\nmodel: gpt-6-sol\n--------\nuser\n"
+
+    def failing(error: str):
+        def run(command, input=None, **kwargs):
+            return subprocess.CompletedProcess(command, 1, "", header + input + "\n" + error + "\n")
+
+        return run
+
+    state = {"entries": [{"id": 1, "output": "POST /login 200; the user logged in"}]}
+    questions = {"t1": {"type": "noul", "instructions": "Does it point to the fault?"}}
+    labeller = CodexLabeller("gpt-6-sol")
+    # a network failure of a request whose text says "login" fails that request only
+    monkeypatch.setattr(subprocess, "run", failing("ERROR: stream disconnected before completion"))
+    with pytest.raises(LabellerError) as caught:
+        labeller.ask(state, questions)
+    assert not isinstance(caught.value, LabellerUnusable)
+    # a spent usage limit or a lost login stops the build
+    for error in ("ERROR: You've hit your usage limit. Try again later.", "Error: Not logged in. Run codex login."):
+        monkeypatch.setattr(subprocess, "run", failing(error))
+        with pytest.raises(LabellerUnusable):
+            labeller.ask(state, questions)

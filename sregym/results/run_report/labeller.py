@@ -446,7 +446,9 @@ class CodexLabeller(LiteLLMLabeller):
                     self.requests += 1
                     self.input_tokens += 0  # the CLI reports one total; it is kept as output below, marked as such
                     self.output_tokens += int(used.group(1).replace(",", "")) if used else 0
-                if re.search(r"usage limit|rate limit reached|log ?in|not logged in|unauthori[sz]ed", said, re.I) and done.returncode:
+                if done.returncode and re.search(
+                    r"usage limit|rate limit reached|log ?in|not logged in|unauthori[sz]ed", _codex_failure(said, prompt), re.I
+                ):
                     raise LabellerUnusable(f"{self.name}: the subscription refused the request (usage limit or login)")
                 if done.returncode:
                     raise LabellerError(f"codex exited {done.returncode}")
@@ -459,6 +461,18 @@ class CodexLabeller(LiteLLMLabeller):
 
     def stats(self) -> dict:
         return {**super().stats(), "tokens_note": "output_tokens holds the CLI's total per request (input and output)"}
+
+
+def _codex_failure(said: str, prompt: str) -> str:
+    """Return the part of Codex's output that says why it failed: its error lines, or else its last lines.
+
+    Codex prints the request back after "user", and the run's text in it can hold any word ("login" in a shop's
+    logs), so the request is taken out first.
+    """
+    own = said.replace(prompt, "").replace(prompt.strip(), "")
+    lines = [line for line in own.splitlines() if line.strip()]
+    errors = [line for line in lines if re.match(r"\s*(?:ERROR|Error|error)\b", line)]
+    return "\n".join(errors or lines[-3:])
 
 
 class ClaudeCodeLabeller(LiteLLMLabeller):
