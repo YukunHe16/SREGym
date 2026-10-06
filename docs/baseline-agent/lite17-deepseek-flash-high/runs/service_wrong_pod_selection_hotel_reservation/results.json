@@ -1,0 +1,70 @@
+{
+  "problem_id": "service_wrong_pod_selection_hotel_reservation",
+  "timestamp": "20261005_223130",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 1448642,
+    "output_tokens": 46975,
+    "cached_input_tokens": 1397628,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 37962,
+    "total_tokens": 1495617
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_eec5c2da2171da7442765645ddb84a69",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 45,
+        "model_calls": 46,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 236.182,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 1161250,
+          "output_tokens": 41280,
+          "cached_input_tokens": 1112444,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 33445,
+          "total_tokens": 1202530
+        }
+      },
+      "mitigation": {
+        "commands_used": 6,
+        "model_calls": 6,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 41.501,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 287392,
+          "output_tokens": 5695,
+          "cached_input_tokens": 285184,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 4517,
+          "total_tokens": 293087
+        }
+      }
+    },
+    "commands_used": 45,
+    "model_calls": 46,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 236.182,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}

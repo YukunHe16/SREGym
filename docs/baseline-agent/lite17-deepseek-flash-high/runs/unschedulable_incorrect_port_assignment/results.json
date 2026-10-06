@@ -1,0 +1,70 @@
+{
+  "problem_id": "unschedulable_incorrect_port_assignment",
+  "timestamp": "20261005_231032",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 124239,
+    "output_tokens": 5221,
+    "cached_input_tokens": 110976,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 2684,
+    "total_tokens": 129460
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_8d743bb0897d8df68ac43d3ae9f7f6c2",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 14,
+        "model_calls": 15,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 33.179,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 98863,
+          "output_tokens": 4721,
+          "cached_input_tokens": 86400,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 2429,
+          "total_tokens": 103584
+        }
+      },
+      "mitigation": {
+        "commands_used": 2,
+        "model_calls": 2,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 3.573,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 25376,
+          "output_tokens": 500,
+          "cached_input_tokens": 24576,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 255,
+          "total_tokens": 25876
+        }
+      }
+    },
+    "commands_used": 14,
+    "model_calls": 15,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 33.179,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}

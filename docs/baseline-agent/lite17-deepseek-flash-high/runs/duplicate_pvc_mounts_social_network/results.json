@@ -1,0 +1,70 @@
+{
+  "problem_id": "duplicate_pvc_mounts_social_network",
+  "timestamp": "20261005_232524",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 2791324,
+    "output_tokens": 76847,
+    "cached_input_tokens": 2724992,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 65687,
+    "total_tokens": 2868171
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_ca89d8f9cb447babc2d3c49794b2397c",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 76,
+        "model_calls": 77,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 548.121,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 2668147,
+          "output_tokens": 76378,
+          "cached_input_tokens": 2602752,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 65548,
+          "total_tokens": 2744525
+        }
+      },
+      "mitigation": {
+        "commands_used": 2,
+        "model_calls": 2,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 10.024,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 123177,
+          "output_tokens": 469,
+          "cached_input_tokens": 122240,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 139,
+          "total_tokens": 123646
+        }
+      }
+    },
+    "commands_used": 76,
+    "model_calls": 77,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 548.121,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}

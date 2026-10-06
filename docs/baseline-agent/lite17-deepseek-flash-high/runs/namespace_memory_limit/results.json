@@ -1,0 +1,70 @@
+{
+  "problem_id": "namespace_memory_limit",
+  "timestamp": "20261005_224225",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 803100,
+    "output_tokens": 56450,
+    "cached_input_tokens": 761468,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 49928,
+    "total_tokens": 859550
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_d287e6d750763292f3100a5150ee39a0",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 24,
+        "model_calls": 24,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 144.695,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 291826,
+          "output_tokens": 26291,
+          "cached_input_tokens": 266236,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 22553,
+          "total_tokens": 318117
+        }
+      },
+      "mitigation": {
+        "commands_used": 15,
+        "model_calls": 15,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 271.55,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 511274,
+          "output_tokens": 30159,
+          "cached_input_tokens": 495232,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 27375,
+          "total_tokens": 541433
+        }
+      }
+    },
+    "commands_used": 24,
+    "model_calls": 24,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 144.695,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}

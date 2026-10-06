@@ -1,0 +1,70 @@
+{
+  "problem_id": "kafka_poison_pill_hol_block",
+  "timestamp": "20261005_220615",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 719293,
+    "output_tokens": 30251,
+    "cached_input_tokens": 681856,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 23900,
+    "total_tokens": 749544
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_25a6e317e5d91a08dcef3eef3c04c056",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 29,
+        "model_calls": 31,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 198.145,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 457825,
+          "output_tokens": 25899,
+          "cached_input_tokens": 427520,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 21478,
+          "total_tokens": 483724
+        }
+      },
+      "mitigation": {
+        "commands_used": 8,
+        "model_calls": 8,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 48.838,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 261468,
+          "output_tokens": 4352,
+          "cached_input_tokens": 254336,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 2422,
+          "total_tokens": 265820
+        }
+      }
+    },
+    "commands_used": 29,
+    "model_calls": 31,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 198.145,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}

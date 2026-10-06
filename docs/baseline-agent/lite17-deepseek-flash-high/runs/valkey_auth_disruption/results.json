@@ -1,0 +1,70 @@
+{
+  "problem_id": "valkey_auth_disruption",
+  "timestamp": "20261005_225239",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 799921,
+    "output_tokens": 49042,
+    "cached_input_tokens": 763520,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 40369,
+    "total_tokens": 848963
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.103.3",
+    "model": "openai/deepseek-flash",
+    "reasoning_effort": "high",
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "submission_mode": "full",
+    "context": "session",
+    "session_reasoning": true,
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "command_timeout_s": 60,
+    "artifact_id": "anon_07d09d7021c4f05642e361f8ee69cebb",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 40,
+        "model_calls": 41,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 300.065,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 699766,
+          "output_tokens": 45900,
+          "cached_input_tokens": 664704,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 37814,
+          "total_tokens": 745666
+        }
+      },
+      "mitigation": {
+        "commands_used": 3,
+        "model_calls": 3,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 49.536,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 100155,
+          "output_tokens": 3142,
+          "cached_input_tokens": 98816,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 2555,
+          "total_tokens": 103297
+        }
+      }
+    },
+    "commands_used": 40,
+    "model_calls": 41,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 300.065,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}
