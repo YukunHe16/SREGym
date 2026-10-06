@@ -1,0 +1,93 @@
+{
+  "problem_id": "admission_webhook_outage_hotel_reservation",
+  "timestamp": "20260929_035118",
+  "return_code": 0,
+  "success": true,
+  "usage_metrics": {
+    "token_metrics_version": 2,
+    "input_tokens": 177313,
+    "output_tokens": 4075,
+    "cached_input_tokens": 165247,
+    "cache_creation_input_tokens": null,
+    "reasoning_output_tokens": 2223,
+    "total_tokens": 181388
+  },
+  "baseline": {
+    "backend": "api",
+    "backend_version": "litellm 1.102.1",
+    "model": "openai/qwen3.8-27b-mtp",
+    "reasoning_effort": null,
+    "protocol": "mini",
+    "submit_mode": "curl",
+    "context": "session",
+    "session_reasoning": true,
+    "max_commands": "unlimited",
+    "submission_mode": "full",
+    "tools": {
+      "protocol": "mini",
+      "local": [
+        "bash"
+      ],
+      "mcp_servers": [],
+      "mcp_tools": [],
+      "mcp_error": null
+    },
+    "hard_cap": 80,
+    "deadline_s": 1500.0,
+    "output_chars": 8000,
+    "artifact_id": "anon_b79b4f90957ecddefb4b62ba31523b06",
+    "stages": {
+      "diagnosis": {
+        "commands_used": 12,
+        "tool_calls_used": 12,
+        "tool_counts": {
+          "bash": 12
+        },
+        "model_calls": 12,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 68.634,
+        "mechanism_guard_tripped": false,
+        "plain_text_submission": false,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 67986,
+          "output_tokens": 3139,
+          "cached_input_tokens": 57812,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 1849,
+          "total_tokens": 71125
+        }
+      },
+      "mitigation": {
+        "commands_used": 8,
+        "tool_calls_used": 8,
+        "tool_counts": {
+          "bash": 8
+        },
+        "model_calls": 8,
+        "termination_reason": "submitted_by_command",
+        "wall_seconds": 30.061,
+        "mechanism_guard_tripped": false,
+        "plain_text_submission": false,
+        "usage_metrics": {
+          "token_metrics_version": 2,
+          "input_tokens": 109327,
+          "output_tokens": 936,
+          "cached_input_tokens": 107435,
+          "cache_creation_input_tokens": null,
+          "reasoning_output_tokens": 374,
+          "total_tokens": 110263
+        }
+      }
+    },
+    "commands_used": 12,
+    "model_calls": 12,
+    "termination_reason": "submitted_by_command",
+    "wall_seconds": 68.634,
+    "mechanism_guard_tripped": false,
+    "submitted_stages": [
+      "diagnosis",
+      "mitigation"
+    ]
+  }
+}
